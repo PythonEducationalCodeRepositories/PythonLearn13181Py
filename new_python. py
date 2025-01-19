@@ -1,0 +1,75 @@
+import numpy as np
+from connection import get_session, get_sentence_embedding
+
+def cosine_similarity_score(vec1, vec2):
+    """
+    Calculate cosine similarity between two vectors.
+    """
+    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+
+def get_most_similar_incident(new_question):
+    """
+    Find the most similar incident based on the query embedding, actions, and suggestions.
+    """
+    # Generate embedding for the input query
+    new_question_embedding = get_sentence_embedding(new_question)
+    new_action_embedding = get_sentence_embedding("Action: " + new_question)
+    new_suggestion_embedding = get_sentence_embedding("Suggestion: " + new_question)
+
+    if new_question_embedding is None or not isinstance(new_question_embedding, np.ndarray):
+        raise ValueError("Failed to generate a valid embedding for the query.")
+
+    with get_session() as session:
+        with session.begin_transaction() as tx:
+            # Query to fetch incidents and their embeddings
+            query = """
+            MATCH (incident:Incident)-[:HAS_ACTION]->(action:Action)
+            RETURN incident.what_happened AS what_happened,
+                   action.actions_taken AS actions_taken,
+                   action.suggestions AS suggestions,
+                   incident.embedding_what_happened AS embedding_what_happened,
+                   action.embedding_actions_taken AS embedding_actions_taken,
+                   action.embedding_suggestions AS embedding_suggestions
+            """
+            result = tx.run(query)
+
+            # Initialize variables to track the most similar incident
+            max_similarity = -1
+            most_similar_incident = None
+            most_similar_actions_taken = None
+            most_similar_suggestions = None
+
+            # Iterate through all incidents and calculate similarity
+            for record in result:
+                # Retrieve embeddings for what_happened, actions_taken, and suggestions
+                embedding_what_happened = np.array(record["embedding_what_happened"])
+                embedding_actions_taken = np.array(record["embedding_actions_taken"])
+                embedding_suggestions = np.array(record["embedding_suggestions"])
+
+                # Skip if any embedding is missing
+                if embedding_what_happened is None or embedding_actions_taken is None or embedding_suggestions is None:
+                    continue
+
+                # Calculate similarity for each embedding
+                similarity_what_happened = cosine_similarity_score(new_question_embedding, embedding_what_happened)
+                similarity_actions = cosine_similarity_score(new_action_embedding, embedding_actions_taken)
+                similarity_suggestions = cosine_similarity_score(new_suggestion_embedding, embedding_suggestions)
+
+                # Combine similarities (weighted average)
+                total_similarity = (
+                    0.5 * similarity_what_happened +  # Higher weight for "what happened"
+                    0.3 * similarity_actions +       # Medium weight for "actions taken"
+                    0.2 * similarity_suggestions     # Lower weight for "suggestions"
+                )
+
+                # Update the most similar incident if this one is better
+                if total_similarity > max_similarity:
+                    max_similarity = total_similarity
+                    most_similar_incident = record["what_happened"]
+                    most_similar_actions_taken = record["actions_taken"]
+                    most_similar_suggestions = record["suggestions"]
+
+    if max_similarity == -1:
+        return None, None, None, None  # No valid match found
+
+    return most_similar_incident, most_similar_actions_taken, most_similar_suggestions, max_similarity
