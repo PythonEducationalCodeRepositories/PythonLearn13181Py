@@ -1,61 +1,15 @@
-import numpy as np
-from connection import get_session, get_sentence_embedding
-
-def cosine_similarity_score(vec1, vec2):
+with session.begin_transaction() as tx:
+    query = """
+    MATCH (incident:Incident)-[:HAS_ACTION]->(action:Action)
+    RETURN incident.what_happened AS what_happened,
+           action.actions_taken AS actions_taken,
+           action.suggestions AS suggestions
     """
-    Calculate cosine similarity between two vectors.
-    """
-    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+    result = tx.run(query)
 
-def get_most_similar_incident(new_question):
-    """
-    Find the most similar incident based on the query embedding.
-    """
-    # Generate embedding for the new question
-    new_question_embedding = get_sentence_embedding(new_question)
-
-    with get_session() as session:
-        with session.begin_transaction() as tx:
-            # Query to get all incidents and their embeddings
-            query = """
-            MATCH (incident:Incident)
-            RETURN incident.what_happened AS what_happened,
-                   incident.actions_taken AS actions_taken,
-                   incident.suggestions AS suggestions,
-                   incident.embedding_what_happened AS embedding
-            """
-            result = tx.run(query)
-
-            # Initialize variables to track the most similar incident
-            max_similarity = -1
-            most_similar_incident = None
-            most_similar_actions_taken = None
-            most_similar_suggestions = None
-
-            # Compare the query embedding with each incident embedding
-            for record in result:
-                incident_embedding = np.array(record["embedding"])
-                similarity = cosine_similarity_score(new_question_embedding, incident_embedding)
-
-                if similarity > max_similarity:
-                    max_similarity = similarity
-                    most_similar_incident = record["what_happened"]
-                    most_similar_actions_taken = record["actions_taken"]
-                    most_similar_suggestions = record["suggestions"]
-
-    return most_similar_incident, most_similar_actions_taken, most_similar_suggestions, max_similarity
-
-
-if __name__ == "__main__":
-    # Input query
-    new_question = input("Enter your question: ")
-
-    # Get the most similar incident
-    similar_incident, actions_taken, suggestions, similarity_score = get_most_similar_incident(new_question)
-
-    # Display the result
-    print(f"\nInput question: {new_question}")
-    print(f"Most similar incident: {similar_incident}")
-    print(f"Actions taken: {actions_taken}")
-    print(f"Suggestions: {suggestions}")
-    print(f"Similarity score: {similarity_score:.4f}")
+    # Debugging: Log all records
+    for record in result:
+        print(f"Raw Record: {record}")
+        print(f"What Happened: {record.get('what_happened')}")
+        print(f"Actions Taken: {record.get('actions_taken')}")
+        print(f"Suggestions: {record.get('suggestions')}")
