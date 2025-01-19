@@ -1,15 +1,46 @@
-with session.begin_transaction() as tx:
-    query = """
-    MATCH (incident:Incident)-[:HAS_ACTION]->(action:Action)
-    RETURN incident.what_happened AS what_happened,
-           action.actions_taken AS actions_taken,
-           action.suggestions AS suggestions
-    """
-    result = tx.run(query)
+from connection import get_session
 
-    # Debugging: Log all records
-    for record in result:
-        print(f"Raw Record: {record}")
-        print(f"What Happened: {record.get('what_happened')}")
-        print(f"Actions Taken: {record.get('actions_taken')}")
-        print(f"Suggestions: {record.get('suggestions')}")
+def fetch_incidents():
+    with get_session() as session:
+        with session.begin_transaction() as tx:
+            query = """
+            MATCH (incident:Incident)-[:OCCURRED_AT]->(site:Site),
+                  (incident)-[:RESPONSIBLE_FOR]->(company:Company),
+                  (incident)-[:HAS_ACTION]->(action:Action),
+                  (company)-[:BELONGS_TO]->(business_unit:BusinessUnit),
+                  (incident)-[:LINKED_TO]->(legal_entity:LegalEntity)
+            RETURN 
+                incident.what_happened AS what_happened,
+                incident.cause AS cause,
+                action.actions_taken AS actions_taken,
+                action.suggestions AS suggestions,
+                site.name AS site_name,
+                site.location AS site_location,
+                company.name AS company_name,
+                company.sector AS sector,
+                business_unit.business_unit AS business_unit,
+                business_unit.sub_business_unit AS sub_business_unit,
+                legal_entity.t_mrc AS t_mrc,
+                legal_entity.t_legal_entity AS t_legal_entity
+            LIMIT 10
+            """
+            result = tx.run(query)
+            
+            # Process the results
+            for record in result:
+                print(f"What Happened: {record.get('what_happened')}")
+                print(f"Cause: {record.get('cause')}")
+                print(f"Actions Taken: {record.get('actions_taken')}")
+                print(f"Suggestions: {record.get('suggestions')}")
+                print(f"Site Name: {record.get('site_name')}")
+                print(f"Site Location: {record.get('site_location')}")
+                print(f"Company Name: {record.get('company_name')}")
+                print(f"Sector: {record.get('sector')}")
+                print(f"Business Unit: {record.get('business_unit')}")
+                print(f"Sub-Business Unit: {record.get('sub_business_unit')}")
+                print(f"T_MRC: {record.get('t_mrc')}")
+                print(f"T_Legal_Entity: {record.get('t_legal_entity')}")
+                print("=" * 50)
+
+if __name__ == "__main__":
+    fetch_incidents()
