@@ -1,102 +1,61 @@
-import csv
+import numpy as np
 from connection import get_session, get_sentence_embedding
 
-def create_nodes_and_relationships(tx, row):
-    # Generate embeddings for each field
-    embedding_site = get_sentence_embedding(row['At what site did this occur or what site is responsible?'])
-    embedding_location = get_sentence_embedding(row['Site Location'])
-    embedding_company = get_sentence_embedding(row['At what Company did this occur or what J&J Company is responsible?'])
-    embedding_sector = get_sentence_embedding(row['Sector'])
-    embedding_what_happened = get_sentence_embedding(row['What Happened?'])
-    embedding_cause = get_sentence_embedding(row['What do you think caused this Incident?'])
-    embedding_actions_taken = get_sentence_embedding(row['What action(s) did you take?'])
-    embedding_suggestions = get_sentence_embedding(row['What action(s) do you suggest?'])
-    embedding_business_unit = get_sentence_embedding(row['EH&S Business Unit'])
-    embedding_sub_business_unit = get_sentence_embedding(row['EH&S Sub-Business Unit'])
-
-    # Updated schema: reusable nodes (Site, Company, BusinessUnit, LegalEntity)
-    query = """
-    // Create or reuse the Site node
-    MERGE (site:Site {
-        name: $site_name,
-        location: $site_location
-    })
-    SET site.embedding_name = $embedding_site,
-        site.embedding_location = $embedding_location
-
-    // Create or reuse the Company node
-    MERGE (company:Company {
-        name: $company_name,
-        sector: $sector
-    })
-    SET company.embedding_name = $embedding_company,
-        company.embedding_sector = $embedding_sector
-
-    // Create or reuse the BusinessUnit node
-    MERGE (business_unit:BusinessUnit {
-        business_unit: $business_unit,
-        sub_business_unit: $sub_business_unit
-    })
-    SET business_unit.embedding_business_unit = $embedding_business_unit,
-        business_unit.embedding_sub_business_unit = $embedding_sub_business_unit
-
-    // Create or reuse the LegalEntity node
-    MERGE (legal_entity:LegalEntity {
-        t_mrc: $t_mrc,
-        t_legal_entity: $t_legal_entity
-    })
-
-    // Create the unique Incident node for this row
-    CREATE (incident:Incident {
-        what_happened: $what_happened,
-        cause: $cause,
-        actions_taken: $actions_taken,
-        suggestions: $suggestions,
-        embedding_what_happened: $embedding_what_happened,
-        embedding_cause: $embedding_cause,
-        embedding_actions_taken: $embedding_actions_taken,
-        embedding_suggestions: $embedding_suggestions,
-        timestamp: datetime()
-    })
-
-    // Create relationships between Incident and other nodes
-    MERGE (incident)-[:OCCURRED_AT]->(site)
-    MERGE (incident)-[:RESPONSIBLE_FOR]->(company)
-    MERGE (site)-[:MANAGED_BY]->(business_unit)
-    MERGE (incident)-[:LINKED_TO]->(legal_entity)
+def cosine_similarity_score(vec1, vec2):
     """
-    # Execute the query with parameterized values
-    tx.run(query,
-           site_name=row['At what site did this occur or what site is responsible?'],
-           site_location=row['Site Location'],
-           embedding_site=embedding_site,
-           embedding_location=embedding_location,
-           company_name=row['At what Company did this occur or what J&J Company is responsible?'],
-           sector=row['Sector'],
-           embedding_company=embedding_company,
-           embedding_sector=embedding_sector,
-           what_happened=row['What Happened?'],
-           cause=row['What do you think caused this Incident?'],
-           embedding_what_happened=embedding_what_happened,
-           embedding_cause=embedding_cause,
-           actions_taken=row['What action(s) did you take?'],
-           suggestions=row['What action(s) do you suggest?'],
-           embedding_actions_taken=embedding_actions_taken,
-           embedding_suggestions=embedding_suggestions,
-           business_unit=row['EH&S Business Unit'],
-           sub_business_unit=row['EH&S Sub-Business Unit'],
-           embedding_business_unit=embedding_business_unit,
-           embedding_sub_business_unit=embedding_sub_business_unit,
-           t_mrc=row['T_MRC'],
-           t_legal_entity=row['T_LEGAL_ENTITY'])
+    Calculate cosine similarity between two vectors.
+    """
+    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
 
-def add_data_to_neo4j(file_path):
-    # Open a Neo4j session and process the CSV file row by row
+def get_most_similar_incident(new_question):
+    """
+    Find the most similar incident based on the query embedding.
+    """
+    # Generate embedding for the new question
+    new_question_embedding = get_sentence_embedding(new_question)
+
     with get_session() as session:
-        with open(file_path, 'r') as file:
-            csv_reader = csv.DictReader(file)
-            for row in csv_reader:
-                session.write_transaction(create_nodes_and_relationships, row)
+        with session.begin_transaction() as tx:
+            # Query to get all incidents and their embeddings
+            query = """
+            MATCH (incident:Incident)
+            RETURN incident.what_happened AS what_happened,
+                   incident.actions_taken AS actions_taken,
+                   incident.suggestions AS suggestions,
+                   incident.embedding_what_happened AS embedding
+            """
+            result = tx.run(query)
 
-# Call the function with the CSV file path
-add_data_to_neo4j('path_to_your_csv_file.csv')
+            # Initialize variables to track the most similar incident
+            max_similarity = -1
+            most_similar_incident = None
+            most_similar_actions_taken = None
+            most_similar_suggestions = None
+
+            # Compare the query embedding with each incident embedding
+            for record in result:
+                incident_embedding = np.array(record["embedding"])
+                similarity = cosine_similarity_score(new_question_embedding, incident_embedding)
+
+                if similarity > max_similarity:
+                    max_similarity = similarity
+                    most_similar_incident = record["what_happened"]
+                    most_similar_actions_taken = record["actions_taken"]
+                    most_similar_suggestions = record["suggestions"]
+
+    return most_similar_incident, most_similar_actions_taken, most_similar_suggestions, max_similarity
+
+
+if __name__ == "__main__":
+    # Input query
+    new_question = input("Enter your question: ")
+
+    # Get the most similar incident
+    similar_incident, actions_taken, suggestions, similarity_score = get_most_similar_incident(new_question)
+
+    # Display the result
+    print(f"\nInput question: {new_question}")
+    print(f"Most similar incident: {similar_incident}")
+    print(f"Actions taken: {actions_taken}")
+    print(f"Suggestions: {suggestions}")
+    print(f"Similarity score: {similarity_score:.4f}")
