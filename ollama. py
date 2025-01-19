@@ -1,0 +1,80 @@
+import requests
+
+def generate_with_ollama(prompt, model="mistral", tokens=100, temperature=0.7):
+    """
+    Generate text using an Ollama model with custom tokens and temperature.
+    
+    Parameters:
+    - prompt: The input text for the model.
+    - model: The name of the model (e.g., "mistral", "llama2").
+    - tokens: Maximum number of tokens in the output.
+    - temperature: Controls the randomness of the output.
+    """
+    url = "http://localhost:11434/api/generate"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "tokens": tokens,
+        "temperature": temperature
+    }
+
+    response = requests.post(url, json=payload, headers=headers)
+
+    if response.status_code == 200:
+        return response.json().get("response", "").strip()
+    else:
+        raise Exception(f"Error: {response.status_code}, {response.text}")
+
+# Example usage
+if __name__ == "__main__":
+    prompt = "Summarize the importance of smaller language models."
+    response = generate_with_ollama(prompt, model="mistral", tokens=50, temperature=0.5)
+    print("Generated Response:", response)
+
+
+
+
+
+
+
+
+import subprocess
+import json
+
+def generate_with_ollama(prompt, model="mistral", tokens=100, temperature=0.7):
+    """
+    Generate text using Ollama locally with custom tokens and temperature.
+
+    Parameters:
+    - prompt: The input text for the model.
+    - model: The name of the Ollama model (e.g., "mistral", "llama2").
+    - tokens: Maximum number of tokens in the output.
+    - temperature: Controls randomness in the output.
+    """
+    # Build the command
+    command = [
+        "ollama", "generate",
+        "--model", model,
+        "--tokens", str(tokens),
+        "--temperature", str(temperature),
+        "--text", prompt
+    ]
+
+    # Run the command and capture the output
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    # Check for errors
+    if result.returncode != 0:
+        raise Exception(f"Error: {result.stderr.strip()}")
+
+    # Parse and return the response
+    response = result.stdout.strip()
+    return response
+
+# Example usage
+if __name__ == "__main__":
+    prompt = "Summarize the importance of lightweight language models."
+    response = generate_with_ollama(prompt, model="mistral", tokens=50, temperature=0.5)
+    print("Generated Response:", response)
+
