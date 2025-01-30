@@ -1,192 +1,70 @@
-from connection import get_session
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+from reportlab.platypus import Paragraph, Frame
+from reportlab.lib.styles import getSampleStyleSheet
 
-def fetch_incidents():
-    with get_session() as session:
-        with session.begin_transaction() as tx:
-            query = """
-            MATCH (incident:Incident)-[:OCCURRED_AT]->(site:Site),
-                  (incident)-[:RESPONSIBLE_FOR]->(company:Company),
-                  (incident)-[:HAS_ACTION]->(action:Action),
-                  (company)-[:BELONGS_TO]->(business_unit:BusinessUnit),
-                  (incident)-[:LINKED_TO]->(legal_entity:LegalEntity)
-            RETURN 
-                incident.what_happened AS what_happened,
-                incident.cause AS cause,
-                action.actions_taken AS actions_taken,
-                action.suggestions AS suggestions,
-                site.name AS site_name,
-                site.location AS site_location,
-                company.name AS company_name,
-                company.sector AS sector,
-                business_unit.business_unit AS business_unit,
-                business_unit.sub_business_unit AS sub_business_unit,
-                legal_entity.t_mrc AS t_mrc,
-                legal_entity.t_legal_entity AS t_legal_entity
-            LIMIT 10
-            """
-            result = tx.run(query)
-            
-            # Process the results
-            for record in result:
-                print(f"What Happened: {record.get('what_happened')}")
-                print(f"Cause: {record.get('cause')}")
-                print(f"Actions Taken: {record.get('actions_taken')}")
-                print(f"Suggestions: {record.get('suggestions')}")
-                print(f"Site Name: {record.get('site_name')}")
-                print(f"Site Location: {record.get('site_location')}")
-                print(f"Company Name: {record.get('company_name')}")
-                print(f"Sector: {record.get('sector')}")
-                print(f"Business Unit: {record.get('business_unit')}")
-                print(f"Sub-Business Unit: {record.get('sub_business_unit')}")
-                print(f"T_MRC: {record.get('t_mrc')}")
-                print(f"T_Legal_Entity: {record.get('t_legal_entity')}")
-                print("=" * 50)
+def create_resume_pdf(output_pdf, name, contact_info, education, skills, filename):
+    c = canvas.Canvas(output_pdf, pagesize=letter)
+    width, height = letter
 
-if __name__ == "__main__":
-    fetch_incidents()
+    # **Set Margins**
+    margin_x = 50  # Left & Right Margin
+    margin_y = 50  # Top & Bottom Margin
+    usable_width = width - 2 * margin_x
+    usable_height = height - 2 * margin_y
 
+    # **Draw Border**
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(2)
+    c.rect(margin_x, margin_y, usable_width, usable_height)
 
+    # **Set Title (Centered)**
+    c.setFont("Helvetica-Bold", 18)
+    c.drawCentredString(width / 2, height - 70, name)
 
+    # **Add Contact Information**
+    y_pos = height - 100
+    c.setFont("Helvetica", 10)
+    contact_details = f"Email: {', '.join(contact_info['email']) if contact_info['email'] else 'N/A'} | "
+    contact_details += f"Phone: {', '.join(contact_info['phone']) if contact_info['phone'] else 'N/A'} | "
+    contact_details += f"LinkedIn: {', '.join(contact_info['linkedin']) if contact_info['linkedin'] else 'N/A'}"
+    
+    # **Wrap Contact Info inside Border**
+    styles = getSampleStyleSheet()
+    contact_para = Paragraph(contact_details, styles["Normal"])
+    contact_frame = Frame(margin_x, y_pos - 30, usable_width, 20, showBoundary=0)
+    contact_frame.addFromList([contact_para], c)
 
+    # **Draw a Line Separator**
+    c.line(margin_x, y_pos - 40, width - margin_x, y_pos - 40)
+    
+    # **Education Section**
+    y_pos -= 60
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(margin_x, y_pos, "Education:")
+    c.setFont("Helvetica", 10)
+    y_pos -= 15
+    for edu in education:
+        c.drawString(margin_x, y_pos, f"- {edu}")
+        y_pos -= 15  # Move down
 
+    # **Skills Section**
+    y_pos -= 20
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(margin_x, y_pos, "Skills:")
+    c.setFont("Helvetica", 10)
+    y_pos -= 15
 
-import numpy as np
-from connection import get_session, get_sentence_embedding
+    # **Wrap Long Skills List Inside Border**
+    skills_text = ", ".join(skills)
+    skills_para = Paragraph(skills_text, styles["Normal"])
+    skills_frame = Frame(margin_x, y_pos - 50, usable_width, 40, showBoundary=0)
+    skills_frame.addFromList([skills_para], c)
 
-def cosine_similarity_score(vec1, vec2):
-    """
-    Calculate cosine similarity between two vectors.
-    """
-    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+    # **Add Source Filename at Bottom**
+    c.setFont("Helvetica", 6)
+    c.drawString(margin_x, margin_y + 10, f"Source File: {filename}")
 
-def get_most_similar_incident(new_question):
-    """
-    Find the most similar incident based on the query embedding.
-    """
-    # Generate embedding for the input query
-    new_question_embedding = get_sentence_embedding(new_question)
-
-    with get_session() as session:
-        with session.begin_transaction() as tx:
-            # Query to fetch incidents and their embeddings
-            query = """
-            MATCH (incident:Incident)-[:HAS_ACTION]->(action:Action)
-            RETURN incident.what_happened AS what_happened,
-                   action.actions_taken AS actions_taken,
-                   action.suggestions AS suggestions,
-                   incident.embedding_what_happened AS embedding
-            """
-            result = tx.run(query)
-
-            # Initialize variables to track the most similar incident
-            max_similarity = -1
-            most_similar_incident = None
-            most_similar_actions_taken = None
-            most_similar_suggestions = None
-
-            # Iterate through all incidents and calculate similarity
-            for record in result:
-                incident_embedding = np.array(record["embedding"])
-                similarity = cosine_similarity_score(new_question_embedding, incident_embedding)
-
-                if similarity > max_similarity:
-                    max_similarity = similarity
-                    most_similar_incident = record["what_happened"]
-                    most_similar_actions_taken = record["actions_taken"]
-                    most_similar_suggestions = record["suggestions"]
-
-    return most_similar_incident, most_similar_actions_taken, most_similar_suggestions, max_similarity
-
-
-
-
-
-
-w
-
-
-
-
-
-import numpy as np
-from connection import get_session, get_sentence_embedding
-from fuzzywuzzy import fuzz
-
-def cosine_similarity_score(vec1, vec2):
-    """
-    Calculate cosine similarity between two vectors.
-    """
-    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
-
-def get_most_similar_incident(new_question):
-    """
-    Find the most similar incident based on the query embedding, actions, and suggestions.
-    """
-    # Generate embedding for the input query
-    new_question_embedding = get_sentence_embedding(new_question)
-
-    if new_question_embedding is None or not isinstance(new_question_embedding, np.ndarray):
-        raise ValueError("Failed to generate a valid embedding for the query.")
-
-    with get_session() as session:
-        with session.begin_transaction() as tx:
-            # Query to fetch incidents and their embeddings
-            query = """
-            MATCH (incident:Incident)-[:HAS_ACTION]->(action:Action)
-            RETURN incident.what_happened AS what_happened,
-                   action.actions_taken AS actions_taken,
-                   action.suggestions AS suggestions,
-                   incident.embedding_what_happened AS embedding_what_happened,
-                   action.embedding_actions_taken AS embedding_actions_taken,
-                   action.embedding_suggestions AS embedding_suggestions
-            """
-            result = tx.run(query)
-
-            # Initialize variables to track the most similar incident
-            max_similarity = -1
-            most_similar_incident = None
-            most_similar_actions_taken = None
-            most_similar_suggestions = None
-
-            # Iterate through all incidents and calculate similarity
-            for record in result:
-                # Retrieve embeddings for what_happened, actions_taken, and suggestions
-                embedding_what_happened = np.array(record["embedding_what_happened"])
-                embedding_actions_taken = np.array(record["embedding_actions_taken"])
-                embedding_suggestions = np.array(record["embedding_suggestions"])
-
-                # Skip if any embedding is missing
-                if embedding_what_happened is None or embedding_actions_taken is None or embedding_suggestions is None:
-                    continue
-
-                # Cosine similarity for embeddings
-                similarity_what_happened = cosine_similarity_score(new_question_embedding, embedding_what_happened)
-                similarity_actions = cosine_similarity_score(new_question_embedding, embedding_actions_taken)
-                similarity_suggestions = cosine_similarity_score(new_question_embedding, embedding_suggestions)
-
-                # Fuzzy string similarity
-                fuzzy_what_happened = fuzz.token_sort_ratio(new_question, record["what_happened"]) / 100.0
-                fuzzy_actions_taken = fuzz.token_sort_ratio(new_question, record["actions_taken"]) / 100.0
-                fuzzy_suggestions = fuzz.token_sort_ratio(new_question, record["suggestions"]) / 100.0
-
-                # Combine similarities with weights
-                total_similarity = (
-                    0.5 * similarity_what_happened +  # Higher weight for "what happened"
-                    0.3 * similarity_actions +       # Medium weight for "actions taken"
-                    0.2 * similarity_suggestions +   # Lower weight for "suggestions"
-                    0.2 * fuzzy_what_happened +      # Include fuzzy scores for robustness
-                    0.15 * fuzzy_actions_taken +
-                    0.15 * fuzzy_suggestions
-                )
-
-                # Update the most similar incident if this one is better
-                if total_similarity > max_similarity:
-                    max_similarity = total_similarity
-                    most_similar_incident = record["what_happened"]
-                    most_similar_actions_taken = record["actions_taken"]
-                    most_similar_suggestions = record["suggestions"]
-
-    if max_similarity == -1:
-        return None, None, None, None  # No valid match found
-
-    return most_similar_incident, most_similar_actions_taken, most_similar_suggestions, max_similarity
+    c.save()
