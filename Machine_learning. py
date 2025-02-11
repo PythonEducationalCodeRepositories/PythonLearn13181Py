@@ -1,70 +1,80 @@
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-from reportlab.lib import colors
-from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, Frame
-from reportlab.lib.styles import getSampleStyleSheet
+import chromadb
+import csv
+import time
+from chromadb.utils import embedding_functions  # Import ChromaDB's embedding functions
 
-def create_resume_pdf(output_pdf, name, contact_info, education, skills, filename):
-    c = canvas.Canvas(output_pdf, pagesize=letter)
-    width, height = letter
+# Initialize ChromaDB client (persistent storage)
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
 
-    # **Set Margins**
-    margin_x = 50  # Left & Right Margin
-    margin_y = 50  # Top & Bottom Margin
-    usable_width = width - 2 * margin_x
-    usable_height = height - 2 * margin_y
+# Create collection in ChromaDB
+collection = chroma_client.get_or_create_collection(name="incident_data")
 
-    # **Draw Border**
-    c.setStrokeColor(colors.black)
-    c.setLineWidth(2)
-    c.rect(margin_x, margin_y, usable_width, usable_height)
+# Initialize ChromaDB's default embedding function
+default_ef = embedding_functions.DefaultEmbeddingFunction()
 
-    # **Set Title (Centered)**
-    c.setFont("Helvetica-Bold", 18)
-    c.drawCentredString(width / 2, height - 70, name)
+def add_question_answer_to_chromadb(data):
+    """Processes and inserts data into ChromaDB using its default embedding function."""
+    documents = []
+    metadatas = []
+    ids = []
+    embeddings = []
 
-    # **Add Contact Information**
-    y_pos = height - 100
-    c.setFont("Helvetica", 10)
-    contact_details = f"Email: {', '.join(contact_info['email']) if contact_info['email'] else 'N/A'} | "
-    contact_details += f"Phone: {', '.join(contact_info['phone']) if contact_info['phone'] else 'N/A'} | "
-    contact_details += f"LinkedIn: {', '.join(contact_info['linkedin']) if contact_info['linkedin'] else 'N/A'}"
-    
-    # **Wrap Contact Info inside Border**
-    styles = getSampleStyleSheet()
-    contact_para = Paragraph(contact_details, styles["Normal"])
-    contact_frame = Frame(margin_x, y_pos - 30, usable_width, 20, showBoundary=0)
-    contact_frame.addFromList([contact_para], c)
+    for idx, (site_location, sector, ehs_business_unit, ehs_sub_business_unit, 
+              site, company, what_happened, what_caused_the_incident, 
+              action_taken, action_suggested, legal_entity, type, mrc) in enumerate(data):
 
-    # **Draw a Line Separator**
-    c.line(margin_x, y_pos - 40, width - margin_x, y_pos - 40)
-    
-    # **Education Section**
-    y_pos -= 60
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(margin_x, y_pos, "Education:")
-    c.setFont("Helvetica", 10)
-    y_pos -= 15
-    for edu in education:
-        c.drawString(margin_x, y_pos, f"- {edu}")
-        y_pos -= 15  # Move down
+        # Prepare document text for embedding
+        document_text = f"{what_happened} {what_caused_the_incident} {action_taken} {action_suggested}"
+        
+        # Generate embeddings using ChromaDB's default function
+        embedding = default_ef([document_text])[0]  # Generate single embedding
 
-    # **Skills Section**
-    y_pos -= 20
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(margin_x, y_pos, "Skills:")
-    c.setFont("Helvetica", 10)
-    y_pos -= 15
+        # Prepare metadata
+        metadata = {
+            "site_location": site_location,
+            "sector": sector,
+            "ehs_business_unit": ehs_business_unit,
+            "ehs_sub_business_unit": ehs_sub_business_unit,
+            "site": site,
+            "company": company,
+            "legal_entity": legal_entity,
+            "type": type,
+            "mrc": mrc,
+        }
 
-    # **Wrap Long Skills List Inside Border**
-    skills_text = ", ".join(skills)
-    skills_para = Paragraph(skills_text, styles["Normal"])
-    skills_frame = Frame(margin_x, y_pos - 50, usable_width, 40, showBoundary=0)
-    skills_frame.addFromList([skills_para], c)
+        # Append to batch lists
+        documents.append(document_text)
+        metadatas.append(metadata)
+        ids.append(str(idx))
+        embeddings.append(embedding)
 
-    # **Add Source Filename at Bottom**
-    c.setFont("Helvetica", 6)
-    c.drawString(margin_x, margin_y + 10, f"Source File: {filename}")
+    # Insert into ChromaDB
+    collection.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
 
-    c.save()
+    print(f"Inserted {len(data)} records into ChromaDB.")
+
+def chunk_list(lst, chunk_size):
+    """Splits the data into smaller chunks"""
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+def process_chunk(chunk):
+    """Processes and inserts each chunk into ChromaDB"""
+    add_question_answer_to_chromadb(chunk)
+    print(f"Processed chunk with {len(chunk)} records.")
+    time.sleep(1)
+
+# Read CSV and process data
+data = []
+with open('GoodSavesEntireDataset.csv', mode='r', encoding='utf-8-sig') as file:
+    csv_reader = csv.reader(file)
+    next(csv_reader)  # Skip header
+    for row in csv_reader:
+        data.append(tuple(row))
+
+if data:
+    chunk_size = 1000
+    chunks = chunk_list(data, chunk_size)
+    for chunk in chunks:
+        process_chunk(chunk)
+else:
+    print("Empty data file!")
