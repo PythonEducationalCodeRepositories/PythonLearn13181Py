@@ -12,7 +12,7 @@ collection = chroma_client.get_or_create_collection(name="incident_data")
 # Initialize ChromaDB's default embedding function
 default_ef = embedding_functions.DefaultEmbeddingFunction()
 
-def add_question_answer_to_chromadb(data):
+def add_question_answer_to_chromadb(data, chunk_number):
     """Processes and inserts data into ChromaDB using its default embedding function."""
     documents = []
     metadatas = []
@@ -51,16 +51,17 @@ def add_question_answer_to_chromadb(data):
     # Insert into ChromaDB
     collection.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
 
-    print(f"Inserted {len(data)} records into ChromaDB.")
+    print(f"✅ Chunk {chunk_number}: Inserted {len(data)} records into ChromaDB.")
 
 def chunk_list(lst, chunk_size):
     """Splits the data into smaller chunks"""
     return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
 
-def process_chunk(chunk):
+def process_chunk(chunk, chunk_number):
     """Processes and inserts each chunk into ChromaDB"""
-    add_question_answer_to_chromadb(chunk)
-    print(f"Processed chunk with {len(chunk)} records.")
+    print(f"🔄 Processing Chunk {chunk_number} with {len(chunk)} records...")
+    add_question_answer_to_chromadb(chunk, chunk_number)
+    print(f"✅ Completed Chunk {chunk_number}.")
     time.sleep(1)
 
 # Read CSV and process data
@@ -74,7 +75,10 @@ with open('GoodSavesEntireDataset.csv', mode='r', encoding='utf-8-sig') as file:
 if data:
     chunk_size = 1000
     chunks = chunk_list(data, chunk_size)
-    for chunk in chunks:
-        process_chunk(chunk)
+
+    for chunk_number, chunk in enumerate(chunks, start=1):
+        process_chunk(chunk, chunk_number)
+
+    print(f"🎉 All {len(chunks)} chunks processed successfully. Total records inserted: {len(data)}")
 else:
-    print("Empty data file!")
+    print("⚠️ No data found in CSV file. Nothing to insert.")
