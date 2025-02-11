@@ -110,3 +110,80 @@ if __name__ == "__main__":
 
     print("🔥 Incident Validation Result:")
     print(json.dumps(result, indent=4))
+
+
+
+
+
+import requests
+import json
+import io
+import asyncio  # Import asyncio for running async functions
+from search import get_most_similar_question_answer  # Use ChromaDB search
+from connection import nlp  # Use existing NLP model
+from env import OLLAMA_API_BASE_URL, MODEL  # Keep API config
+
+async def validate_data(incident_type, response):
+    """Validates incident data using ChromaDB similarity search and calls an AI model."""
+    isValid = False
+    generated_text = ""
+    response_text = ""
+
+    # Get most similar incident using ChromaDB
+    similar_incident, similar_action_taken, similar_action_suggested, similarity_distance = get_most_similar_question_answer(incident_type)
+
+    if similarity_distance > 15:  # Threshold for validation
+        isValid = True
+        context = f"Rewrite the response:\n{response}\nPrompt: {incident_type}"
+
+        # Print augmented query (for debugging)
+        print(f"🔍 Augmented Query:\n{context}")
+
+        # Prepare the query for AI model
+        augmented_query = {
+            "historical_incident": similar_incident,
+            "historical_action_suggested": similar_action_suggested,
+            "query": f"Rewrite the incident & action_suggested with context: {context}"
+        }
+
+        # Call Ollama API for text generation
+        ollama_api_url = f"{OLLAMA_API_BASE_URL}/generate"
+        ollama_payload = {
+            "model": MODEL,
+            "prompt": json.dumps(augmented_query),
+            "temperature": 0.1,
+            "max_tokens": 150,
+            "num_return_sequences": 1,
+            "stop": ["\n"]
+        }
+
+        r = requests.post(ollama_api_url, json=ollama_payload)
+
+        if r.status_code == 200:
+            r.raise_for_status()
+            buffer = io.StringIO()
+
+            for line in r.iter_lines():
+                body = json.loads(line)
+                response_part = body.get("response", "")
+                response_text += str(response_part)
+                buffer.write(response_part)
+            buffer.flush()
+
+    # Return final results
+    return {
+        "historical_similarities": similarity_distance,
+        "generated_text": response_text,
+        "isValid": isValid
+    }
+
+# Example Usage (Fix: Use asyncio.run())
+if __name__ == "__main__":
+    incident_type = "fire accident"
+    response = "fire emergency response plan"
+
+    # ✅ Properly calling the async function
+    result = asyncio.run(validate_data(incident_type, response))
+
+    print("🔥 Incident Validation Result:")
+    print(json.dumps(result, indent=4))
