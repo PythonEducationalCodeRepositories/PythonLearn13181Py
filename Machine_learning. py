@@ -168,3 +168,95 @@ This exactly replicates your Neo4j-based search logic but with ChromaDB, making 
 
 Let me know if you need any modifications!
 
+
+
+
+
+
+import chromadb
+import csv
+import time
+from chromadb.utils import embedding_functions  # Import ChromaDB's embedding functions
+
+# Initialize ChromaDB client (persistent storage)
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
+
+# Create collection in ChromaDB
+collection = chroma_client.get_or_create_collection(name="incident_data")
+
+# Initialize ChromaDB's default embedding function
+default_ef = embedding_functions.DefaultEmbeddingFunction()
+
+def add_question_answer_to_chromadb(data, chunk_number):
+    """Processes and inserts data into ChromaDB using its default embedding function."""
+    documents = []
+    metadatas = []
+    ids = []
+    embeddings = []
+
+    for idx, (site_location, sector, ehs_business_unit, ehs_sub_business_unit, 
+              site, company, what_happened, what_caused_the_incident, 
+              action_taken, action_suggested, legal_entity, type, mrc) in enumerate(data):
+
+        # Generate unique ID using chunk number + row index
+        unique_id = f"chunk{chunk_number}_row{idx}"
+
+        # Prepare document text for embedding
+        document_text = f"{what_happened} {what_caused_the_incident} {action_taken} {action_suggested}"
+        
+        # Generate embeddings using ChromaDB's default function
+        embedding = default_ef([document_text])[0]  # Generate single embedding
+
+        # Prepare metadata
+        metadata = {
+            "site_location": site_location,
+            "sector": sector,
+            "ehs_business_unit": ehs_business_unit,
+            "ehs_sub_business_unit": ehs_sub_business_unit,
+            "site": site,
+            "company": company,
+            "legal_entity": legal_entity,
+            "type": type,
+            "mrc": mrc,
+        }
+
+        # Append to batch lists
+        documents.append(document_text)
+        metadatas.append(metadata)
+        ids.append(unique_id)  # Use unique ID
+        embeddings.append(embedding)
+
+    # Insert into ChromaDB
+    collection.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+
+    print(f"✅ Chunk {chunk_number}: Inserted {len(data)} records into ChromaDB.")
+
+def chunk_list(lst, chunk_size):
+    """Splits the data into smaller chunks"""
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+def process_chunk(chunk, chunk_number):
+    """Processes and inserts each chunk into ChromaDB"""
+    print(f"🔄 Processing Chunk {chunk_number} with {len(chunk)} records...")
+    add_question_answer_to_chromadb(chunk, chunk_number)
+    print(f"✅ Completed Chunk {chunk_number}.")
+    time.sleep(1)
+
+# Read CSV and process data
+data = []
+with open('GoodSavesEntireDataset.csv', mode='r', encoding='utf-8-sig') as file:
+    csv_reader = csv.reader(file)
+    next(csv_reader)  # Skip header
+    for row in csv_reader:
+        data.append(tuple(row))
+
+if data:
+    chunk_size = 1000
+    chunks = chunk_list(data, chunk_size)
+
+    for chunk_number, chunk in enumerate(chunks, start=1):
+        process_chunk(chunk, chunk_number)
+
+    print(f"🎉 All {len(chunks)} chunks processed successfully. Total records inserted: {len(data)}")
+else:
+    print("⚠️ No data found in CSV file. Nothing to insert.")
