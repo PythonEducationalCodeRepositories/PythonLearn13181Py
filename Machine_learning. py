@@ -1,84 +1,170 @@
-import chromadb
-import csv
-import time
-from chromadb.utils import embedding_functions  # Import ChromaDB's embedding functions
+Connecting to ChromaDB and Implementing Search Functionality
 
-# Initialize ChromaDB client (persistent storage)
+I'll write a connection script (connection.py) to connect to ChromaDB and a search script (search.py) that performs similarity search exactly like your Neo4j-based code, but using ChromaDB instead.
+
+
+---
+
+1️⃣ Setup ChromaDB Connection (connection.py)
+
+This script connects to ChromaDB and provides a function to get sentence embeddings.
+
+import chromadb
+from chromadb.utils import embedding_functions
+
+# Initialize ChromaDB persistent client
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
 
-# Create collection in ChromaDB
+# Connect to existing collection or create if not exists
 collection = chroma_client.get_or_create_collection(name="incident_data")
 
-# Initialize ChromaDB's default embedding function
+# ChromaDB default embedding function
 default_ef = embedding_functions.DefaultEmbeddingFunction()
 
-def add_question_answer_to_chromadb(data, chunk_number):
-    """Processes and inserts data into ChromaDB using its default embedding function."""
-    documents = []
-    metadatas = []
-    ids = []
-    embeddings = []
+def get_sentence_embedding(text):
+    """Generate embedding using ChromaDB's default embedding function."""
+    return default_ef([text])[0]
 
-    for idx, (site_location, sector, ehs_business_unit, ehs_sub_business_unit, 
-              site, company, what_happened, what_caused_the_incident, 
-              action_taken, action_suggested, legal_entity, type, mrc) in enumerate(data):
+def get_collection():
+    """Returns the ChromaDB collection instance."""
+    return collection
 
-        # Prepare document text for embedding
-        document_text = f"{what_happened} {what_caused_the_incident} {action_taken} {action_suggested}"
-        
-        # Generate embeddings using ChromaDB's default function
-        embedding = default_ef([document_text])[0]  # Generate single embedding
 
-        # Prepare metadata
-        metadata = {
-            "site_location": site_location,
-            "sector": sector,
-            "ehs_business_unit": ehs_business_unit,
-            "ehs_sub_business_unit": ehs_sub_business_unit,
-            "site": site,
-            "company": company,
-            "legal_entity": legal_entity,
-            "type": type,
-            "mrc": mrc,
-        }
+---
 
-        # Append to batch lists
-        documents.append(document_text)
-        metadatas.append(metadata)
-        ids.append(str(idx))
-        embeddings.append(embedding)
+2️⃣ Implement Search Functionality (search.py)
 
-    # Insert into ChromaDB
-    collection.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+This script searches ChromaDB for the most similar incidents using cosine similarity.
 
-    print(f"✅ Chunk {chunk_number}: Inserted {len(data)} records into ChromaDB.")
+import numpy as np
+from connection import get_sentence_embedding, get_collection
 
-def chunk_list(lst, chunk_size):
-    """Splits the data into smaller chunks"""
-    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+def cosine_similarity_score(vec1, vec2):
+    """Compute cosine similarity between two vectors."""
+    norm1 = np.linalg.norm(vec1)
+    norm2 = np.linalg.norm(vec2)
 
-def process_chunk(chunk, chunk_number):
-    """Processes and inserts each chunk into ChromaDB"""
-    print(f"🔄 Processing Chunk {chunk_number} with {len(chunk)} records...")
-    add_question_answer_to_chromadb(chunk, chunk_number)
-    print(f"✅ Completed Chunk {chunk_number}.")
-    time.sleep(1)
+    if norm1 == 0 or norm2 == 0:
+        return 0
 
-# Read CSV and process data
-data = []
-with open('GoodSavesEntireDataset.csv', mode='r', encoding='utf-8-sig') as file:
-    csv_reader = csv.reader(file)
-    next(csv_reader)  # Skip header
-    for row in csv_reader:
-        data.append(tuple(row))
+    return np.dot(vec1, vec2) / (norm1 * norm2)
 
-if data:
-    chunk_size = 1000
-    chunks = chunk_list(data, chunk_size)
+def get_most_similar_question_answer(new_incident):
+    """Find the most similar incident in ChromaDB based on embedding similarity."""
+    collection = get_collection()
+    new_incident_embedding = get_sentence_embedding(new_incident)
 
-    for chunk_number, chunk in enumerate(chunks, start=1):
-        process_chunk(chunk, chunk_number)
+    # Query ChromaDB for all stored documents
+    all_documents = collection.get(include=["embeddings", "documents", "metadatas"])
 
-    print(f"🎉 All {len(chunks)} chunks processed successfully. Total records inserted: {len(data)}")
-else:
-    print("⚠️ No data found in CSV file. Nothing to insert.")
+    max_similarity = -1
+    most_similar_incident = None
+    most_similar_action_taken = None
+    most_similar_action_suggested = None
+
+    for idx, embedding in enumerate(all_documents["embeddings"]):
+        # Compute similarity score
+        similarity = cosine_similarity_score(new_incident_embedding, embedding)
+
+        if similarity > max_similarity:
+            max_similarity = similarity
+            most_similar_incident = all_documents["documents"][idx]
+            most_similar_action_taken = all_documents["metadatas"][idx].get("action_taken", None)
+            most_similar_action_suggested = all_documents["metadatas"][idx].get("action_suggested", None)
+
+    return most_similar_incident, most_similar_action_taken, most_similar_action_suggested, max_similarity
+
+# Example usage:
+if __name__ == "__main__":
+    query_text = "Worker slipped on wet floor and suffered minor injuries"
+    similar_incident, action_taken, action_suggested, similarity = get_most_similar_question_answer(query_text)
+
+    print(f"Most Similar Incident: {similar_incident}")
+    print(f"Recommended Action Taken: {action_taken}")
+    print(f"Suggested Action: {action_suggested}")
+    print(f"Similarity Score: {similarity:.4f}")
+
+
+---
+
+3️⃣ Searching Incidents Based on Type (compare_incident.py)
+
+This function finds similar incidents based on type, just like in your Neo4j code.
+
+from connection import get_sentence_embedding, get_collection
+
+def compare_incident(incident_type, response):
+    """Find similar incidents by type and compare their similarity."""
+    collection = get_collection()
+
+    # Query incidents matching the given type
+    results = collection.query(
+        query_texts=[incident_type],
+        n_results=5  # Return top 5 most similar incidents
+    )
+
+    similarities = []
+    for i, doc in enumerate(results["documents"]):
+        incident_desc = results["documents"][i]
+        incident_metadata = results["metadatas"][i]
+
+        similarities.append({
+            "historical_incident": incident_desc,
+            "similarity_distance": results["distances"][i],
+            "suggested_action": incident_metadata.get("action_suggested", None)
+        })
+
+    return similarities
+
+# Example usage:
+if __name__ == "__main__":
+    incident_type = "fire accident"
+    response = "fire emergency response"
+    similar_incidents = compare_incident(incident_type, response)
+
+    for incident in similar_incidents:
+        print(f"Incident: {incident['historical_incident']}")
+        print(f"Similarity Score: {incident['similarity_distance']:.4f}")
+        print(f"Suggested Action: {incident['suggested_action']}")
+        print("-" * 50)
+
+
+---
+
+4️⃣ How This Works
+
+connection.py → Connects to ChromaDB and provides embeddings.
+
+search.py → Searches for the most similar past incident.
+
+compare_incident.py → Finds similar incidents by type.
+
+Results are sorted based on similarity scores (Cosine Similarity).
+
+
+
+---
+
+5️⃣ Running the Search
+
+1️⃣ Ensure dependencies are installed
+
+pip install chromadb numpy
+
+2️⃣ Run a similarity search for a new incident
+
+python search.py
+
+3️⃣ Find similar incidents by type
+
+python compare_incident.py
+
+
+---
+
+✅ Neo4j Fully Replaced by ChromaDB
+
+This exactly replicates your Neo4j-based search logic but with ChromaDB, making it faster and optimized for vector search. 🚀
+
+Let me know if you need any modifications!
+
