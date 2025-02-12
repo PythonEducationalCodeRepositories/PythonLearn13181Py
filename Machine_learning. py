@@ -1,42 +1,101 @@
 import chromadb
+import csv
+import time
+from chromadb.utils import embedding_functions  # Import ChromaDB's embedding functions
 
-# Connect to ChromaDB (Persistent Storage)
+# Initialize ChromaDB client (persistent storage)
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
 
-# Manually list collection names
-collection_names = [col.name for col in chroma_client.list_collections()]
+# Create collection in ChromaDB
+collection = chroma_client.get_or_create_collection(name="incident_data")
 
-if not collection_names:
-    print("❌ No collections found in ChromaDB.")
-    exit()
+# Initialize ChromaDB's default embedding function
+default_ef = embedding_functions.DefaultEmbeddingFunction()
 
-print("📂 **Available Collections:**")
-for name in collection_names:
-    print(f"- {name}")
+def add_question_answer_to_chromadb(data, chunk_number):
+    """Processes and inserts data into ChromaDB while preserving Neo4j-like relationships."""
+    documents = []
+    metadatas = []
+    ids = []
+    embeddings = []
 
-print("\n📜 **Full Schema Dump**")
-print("=" * 50)
+    for idx, (site_location, sector, ehs_business_unit, ehs_sub_business_unit, 
+              site, company, what_happened, what_caused_the_incident, 
+              action_taken, action_suggested, legal_entity, incident_type, mrc) in enumerate(data):
 
-# Iterate over each collection
-for name in collection_names:
-    print(f"\n🔍 **Collection: {name}**")
-    print("-" * 50)
+        # Generate unique ID using chunk number + row index
+        unique_id = f"chunk{chunk_number}_row{idx}"
 
-    # Load collection
-    col = chroma_client.get_collection(name=name)
+        # Prepare document text for embedding
+        document_text = f"{what_happened} {what_caused_the_incident} {action_taken} {action_suggested}"
+        
+        # Generate embeddings using ChromaDB's default function
+        embedding = default_ef([document_text])[0]  # Generate single embedding
 
-    # Fetch all data (Documents, Metadata, Embeddings)
-    data = col.get(include=["documents", "metadatas", "embeddings"], limit=5)  # Limit to 5 for preview
+        # Prepare metadata (Simulating Neo4j relationships)
+        metadata = {
+            "site_location": site_location,
+            "sector": sector,
+            "ehs_business_unit": ehs_business_unit,
+            "ehs_sub_business_unit": ehs_sub_business_unit,
+            "site": site,
+            "company": company,
+            "legal_entity": legal_entity,
+            "incident_type": incident_type,
+            "mrc": mrc,
+            "relations": {
+                "HAS_SECTOR": sector,
+                "HAS_BUSINESS_UNIT": ehs_business_unit,
+                "HAS_SUB_BUSINESS_UNIT": ehs_sub_business_unit,
+                "HAS_SITE": site,
+                "HAS_COMPANY": company,
+                "HAS_HAPPENED": what_happened,
+                "HAS_CAUSE": what_caused_the_incident,
+                "HAS_ACTION_TAKEN": action_taken,
+                "HAS_ACTION_SUGGESTED": action_suggested,
+                "HAS_TYPE": incident_type,
+                "HAS_MRC": mrc,
+                "IS_ASSOCIATED_WITH": legal_entity
+            }
+        }
 
-    # Print total records (if available)
-    total_records = len(data.get("documents", []))
-    print(f"📊 Total Records: {total_records}")
+        # Append to batch lists
+        documents.append(document_text)
+        metadatas.append(metadata)
+        ids.append(unique_id)  # Use unique ID
+        embeddings.append(embedding)
 
-    # Print example schema from the first record (if available)
-    if total_records > 0:
-        print("\n📝 **Schema Example:**")
-        print(f"🔹 **Document Sample:** {data['documents'][0]}")
-        print(f"🔹 **Metadata Sample:** {data['metadatas'][0]}")
-        print(f"🔹 **Embedding Sample (First 5 values):** {data['embeddings'][0][:5]} ...")
+    # Insert into ChromaDB
+    collection.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
 
-    print("=" * 50)
+    print(f"✅ Chunk {chunk_number}: Inserted {len(data)} records into ChromaDB.")
+
+def chunk_list(lst, chunk_size):
+    """Splits the data into smaller chunks"""
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+def process_chunk(chunk, chunk_number):
+    """Processes and inserts each chunk into ChromaDB"""
+    print(f"🔄 Processing Chunk {chunk_number} with {len(chunk)} records...")
+    add_question_answer_to_chromadb(chunk, chunk_number)
+    print(f"✅ Completed Chunk {chunk_number}.")
+    time.sleep(1)
+
+# Read CSV and process data
+data = []
+with open('GoodSavesEntireDataset.csv', mode='r', encoding='utf-8-sig') as file:
+    csv_reader = csv.reader(file)
+    next(csv_reader)  # Skip header
+    for row in csv_reader:
+        data.append(tuple(row))
+
+if data:
+    chunk_size = 1000
+    chunks = chunk_list(data, chunk_size)
+
+    for chunk_number, chunk in enumerate(chunks, start=1):
+        process_chunk(chunk, chunk_number)
+
+    print(f"🎉 All {len(chunks)} chunks processed successfully. Total records inserted: {len(data)}")
+else:
+    print("⚠️ No data found in CSV file. Nothing to insert.")
