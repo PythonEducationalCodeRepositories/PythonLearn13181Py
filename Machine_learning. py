@@ -3,37 +3,37 @@ import chromadb
 # Connect to ChromaDB (Persistent Storage)
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
 
-# Get all collections
-collections = chroma_client.list_collections()
+# Manually list collection names
+collection_names = [col.name for col in chroma_client.list_collections()]
 
-# If no collections exist
-if not collections:
+if not collection_names:
     print("❌ No collections found in ChromaDB.")
     exit()
 
 print("📂 **Available Collections:**")
-for collection in collections:
-    print(f"- {collection.name}")
+for name in collection_names:
+    print(f"- {name}")
 
 print("\n📜 **Full Schema Dump**")
 print("=" * 50)
 
-# Iterate over all collections
-for collection in collections:
-    print(f"\n🔍 **Collection: {collection.name}**")
+# Iterate over each collection
+for name in collection_names:
+    print(f"\n🔍 **Collection: {name}**")
     print("-" * 50)
 
-    # Load the collection
-    col = chroma_client.get_collection(name=collection.name)
+    # Load collection
+    col = chroma_client.get_collection(name=name)
 
     # Fetch all data (Documents, Metadata, Embeddings)
-    data = col.get(include=["documents", "metadatas", "embeddings"])
+    data = col.get(include=["documents", "metadatas", "embeddings"], limit=5)  # Limit to 5 for preview
 
-    # Print total records
-    print(f"📊 Total Records: {len(data['documents'])}")
+    # Print total records (if available)
+    total_records = len(data.get("documents", []))
+    print(f"📊 Total Records: {total_records}")
 
-    # Print schema from first record (as example)
-    if len(data["documents"]) > 0:
+    # Print example schema from the first record (if available)
+    if total_records > 0:
         print("\n📝 **Schema Example:**")
         print(f"🔹 **Document Sample:** {data['documents'][0]}")
         print(f"🔹 **Metadata Sample:** {data['metadatas'][0]}")
