@@ -13,26 +13,32 @@ collection = chroma_client.get_or_create_collection(name="incident_data")
 default_ef = embedding_functions.DefaultEmbeddingFunction()
 
 def add_question_answer_to_chromadb(data, chunk_number):
-    """Processes and inserts data into ChromaDB while preserving Neo4j-like relationships."""
+    """Processes and inserts data into ChromaDB using its default embedding function."""
     documents = []
     metadatas = []
     ids = []
     embeddings = []
 
-    for idx, (site_location, sector, ehs_business_unit, ehs_sub_business_unit, 
-              site, company, what_happened, what_caused_the_incident, 
-              action_taken, action_suggested, legal_entity, incident_type, mrc) in enumerate(data):
+    for idx, row in enumerate(data):
+        # Ensure the row has the correct number of columns (Expected: 13)
+        if len(row) < 13:
+            print(f"⚠️ Skipping Row {idx + 1}: Expected 13 columns, but got {len(row)} → {row}")
+            continue  # Skip malformed rows
+
+        # Extract columns safely
+        site_location, sector, ehs_business_unit, ehs_sub_business_unit, site, company, what_happened, \
+        what_caused_the_incident, action_taken, action_suggested, legal_entity, incident_type, mrc = row
 
         # Generate unique ID using chunk number + row index
         unique_id = f"chunk{chunk_number}_row{idx}"
 
         # Prepare document text for embedding
         document_text = f"{what_happened} {what_caused_the_incident} {action_taken} {action_suggested}"
-        
+
         # Generate embeddings using ChromaDB's default function
         embedding = default_ef([document_text])[0]  # Generate single embedding
 
-        # Prepare metadata (Simulating Neo4j relationships)
+        # Prepare metadata
         metadata = {
             "site_location": site_location,
             "sector": sector,
@@ -41,22 +47,8 @@ def add_question_answer_to_chromadb(data, chunk_number):
             "site": site,
             "company": company,
             "legal_entity": legal_entity,
-            "incident_type": incident_type,
+            "type": incident_type,
             "mrc": mrc,
-            "relations": {
-                "HAS_SECTOR": sector,
-                "HAS_BUSINESS_UNIT": ehs_business_unit,
-                "HAS_SUB_BUSINESS_UNIT": ehs_sub_business_unit,
-                "HAS_SITE": site,
-                "HAS_COMPANY": company,
-                "HAS_HAPPENED": what_happened,
-                "HAS_CAUSE": what_caused_the_incident,
-                "HAS_ACTION_TAKEN": action_taken,
-                "HAS_ACTION_SUGGESTED": action_suggested,
-                "HAS_TYPE": incident_type,
-                "HAS_MRC": mrc,
-                "IS_ASSOCIATED_WITH": legal_entity
-            }
         }
 
         # Append to batch lists
@@ -66,9 +58,11 @@ def add_question_answer_to_chromadb(data, chunk_number):
         embeddings.append(embedding)
 
     # Insert into ChromaDB
-    collection.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
-
-    print(f"✅ Chunk {chunk_number}: Inserted {len(data)} records into ChromaDB.")
+    if documents:
+        collection.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+        print(f"✅ Chunk {chunk_number}: Inserted {len(documents)} valid records into ChromaDB.")
+    else:
+        print(f"⚠️ Chunk {chunk_number}: No valid records found, skipping insertion.")
 
 def chunk_list(lst, chunk_size):
     """Splits the data into smaller chunks"""
@@ -85,9 +79,14 @@ def process_chunk(chunk, chunk_number):
 data = []
 with open('GoodSavesEntireDataset.csv', mode='r', encoding='utf-8-sig') as file:
     csv_reader = csv.reader(file)
-    next(csv_reader)  # Skip header
-    for row in csv_reader:
-        data.append(tuple(row))
+    header = next(csv_reader)  # Skip header
+
+    for row_num, row in enumerate(csv_reader, start=1):
+        if len(row) < 13:  # Ensure it has enough columns
+            print(f"⚠️ Warning: Row {row_num} has {len(row)} columns instead of 13. Skipping.")
+            continue  # Skip malformed rows
+
+        data.append(tuple(row))  # Store only valid rows
 
 if data:
     chunk_size = 1000
@@ -96,6 +95,6 @@ if data:
     for chunk_number, chunk in enumerate(chunks, start=1):
         process_chunk(chunk, chunk_number)
 
-    print(f"🎉 All {len(chunks)} chunks processed successfully. Total records inserted: {len(data)}")
+    print(f"🎉 All {len(chunks)} chunks processed successfully. Total valid records inserted: {len(data)}")
 else:
-    print("⚠️ No data found in CSV file. Nothing to insert.")
+    print("⚠️ No valid data found in CSV file. Nothing to insert.")
