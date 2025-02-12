@@ -13,7 +13,7 @@ collection = chroma_client.get_or_create_collection(name="incident_data")
 default_ef = embedding_functions.DefaultEmbeddingFunction()
 
 def add_question_answer_to_chromadb(data, chunk_number):
-    """Processes and inserts data into ChromaDB using its default embedding function."""
+    """Processes and inserts data into ChromaDB while ensuring correct headers."""
     documents = []
     metadatas = []
     ids = []
@@ -25,9 +25,20 @@ def add_question_answer_to_chromadb(data, chunk_number):
             print(f"⚠️ Skipping Row {idx + 1}: Expected 13 columns, but got {len(row)} → {row}")
             continue  # Skip malformed rows
 
-        # Extract columns safely
-        site_location, sector, ehs_business_unit, ehs_sub_business_unit, site, company, what_happened, \
-        what_caused_the_incident, action_taken, action_suggested, legal_entity, incident_type, mrc = row
+        # Extract columns based on new CSV headers
+        site = row[0]  # At what site did this occur?
+        company = row[1]  # At what company did this occur?
+        sector = row[2]  # Sector
+        ehs_business_unit = row[3]  # EH&S Business Unit
+        ehs_sub_business_unit = row[4]  # EH&S Sub-Business Unit
+        site_location = row[5]  # Site Location
+        what_happened = row[6]  # What Happened?
+        what_caused_the_incident = row[7]  # What do you think caused this incident?
+        action_taken = row[8]  # What action(s) did you take?
+        action_suggested = row[9]  # What action(s) do you suggest?
+        t_mrc = row[10]  # T_MRC
+        t_legal_entity = row[11]  # T_LEGAL_ENTITY
+        type_short = row[12]  # Type
 
         # Generate unique ID using chunk number + row index
         unique_id = f"chunk{chunk_number}_row{idx}"
@@ -38,17 +49,21 @@ def add_question_answer_to_chromadb(data, chunk_number):
         # Generate embeddings using ChromaDB's default function
         embedding = default_ef([document_text])[0]  # Generate single embedding
 
-        # Prepare metadata
+        # Prepare metadata with corrected headers
         metadata = {
-            "site_location": site_location,
+            "site": site,
+            "company": company,
             "sector": sector,
             "ehs_business_unit": ehs_business_unit,
             "ehs_sub_business_unit": ehs_sub_business_unit,
-            "site": site,
-            "company": company,
-            "legal_entity": legal_entity,
-            "type": incident_type,
-            "mrc": mrc,
+            "site_location": site_location,
+            "what_happened": what_happened,
+            "what_caused_the_incident": what_caused_the_incident,
+            "action_taken": action_taken,
+            "action_suggested": action_suggested,
+            "T_MRC": t_mrc,  # Corrected field name
+            "T_LEGAL_ENTITY": t_legal_entity,  # Corrected field name
+            "Type_short": type_short,  # Corrected field name
         }
 
         # Append to batch lists
