@@ -1,72 +1,46 @@
 import os
-from PIL import Image
 from docx import Document
 from docx.shared import Inches
 from datetime import datetime
 
-# Function to get image details
-def get_image_details(image_path):
-    try:
-        image = Image.open(image_path)
-        image_details = {
-            'filename': os.path.basename(image_path),
-            'size': image.size,
-            'format': image.format,
-            'mode': image.mode,
-            'creation_time': datetime.fromtimestamp(os.path.getctime(image_path)).strftime('%Y-%m-%d %H:%M:%S'),
-            'path': image_path
-        }
-        return image_details
-    except Exception as e:
-        print(f"Error processing image {image_path}: {e}")
-        return None
-
-# Function to write details & images to Word file
-def write_to_word(image_details, output_path):
-    doc = Document()
-    doc.add_heading('Screenshot Details', 0)
-
-    for detail in image_details:
-        doc.add_paragraph(f"Filename: {detail['filename']}")
-        doc.add_paragraph(f"Size: {detail['size']}")
-        doc.add_paragraph(f"Format: {detail['format']}")
-        doc.add_paragraph(f"Mode: {detail['mode']}")
-        doc.add_paragraph(f"Creation Time: {detail['creation_time']}")
-        
-        # Insert Image
-        doc.add_picture(detail['path'], width=Inches(4))  # Resizing to fit the doc
-        doc.add_paragraph("-" * 40)  # Separator
-
-    doc.save(output_path)
-
-# Main function to handle the workflow
-def main():
-    # Get the current working directory
-    cwd = os.getcwd()
-
-    # Path to the folder containing screenshots (assuming it's in cwd)
-    folder_name = "screenshots"  # Replace if necessary
-    folder_path = os.path.join(cwd, folder_name)
-
-    # Get all PNG files from the folder
+# Function to get sorted list of image paths based on creation date and time
+def get_sorted_images(folder_path):
     png_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.png')]
     png_file_paths = [os.path.join(folder_path, f) for f in png_files]
 
-    # Sort files by creation time (ascending order)
+    # Sort images by creation time (earliest first)
     png_file_paths.sort(key=lambda x: os.path.getctime(x))
+    
+    return png_file_paths
 
-    # Get the details of each image
-    image_details = []
-    for file_path in png_file_paths:
-        details = get_image_details(file_path)
-        if details:
-            image_details.append(details)
+# Function to add images to Word file
+def add_images_to_word(image_paths, output_path):
+    doc = Document()
 
-    # Write details & images to a Word file
-    output_word_path = os.path.join(cwd, 'screenshot_details.docx')
-    write_to_word(image_details, output_word_path)
+    for img_path in image_paths:
+        creation_time = datetime.fromtimestamp(os.path.getctime(img_path)).strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Add image with timestamp
+        doc.add_paragraph(f"Captured On: {creation_time}")
+        doc.add_picture(img_path, width=Inches(4))  # Resize to fit page
+        doc.add_paragraph("\n")  # Space between images
 
-    print(f"Word file with images created: {output_word_path}")
+    doc.save(output_path)
+
+# Main function
+def main():
+    cwd = os.getcwd()
+    folder_name = "screenshots"  # Folder containing images
+    folder_path = os.path.join(cwd, folder_name)
+
+    # Get sorted image paths
+    image_paths = get_sorted_images(folder_path)
+
+    # Save images to Word file
+    output_word_path = os.path.join(cwd, 'screenshots.docx')
+    add_images_to_word(image_paths, output_word_path)
+
+    print(f"Word file created: {output_word_path}")
 
 if __name__ == '__main__':
     main()
