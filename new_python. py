@@ -1,6 +1,7 @@
 import os
 from PIL import Image
 from docx import Document
+from docx.shared import Inches
 from datetime import datetime
 
 # Function to get image details
@@ -12,14 +13,15 @@ def get_image_details(image_path):
             'size': image.size,
             'format': image.format,
             'mode': image.mode,
-            'creation_time': datetime.fromtimestamp(os.path.getctime(image_path)).strftime('%Y-%m-%d %H:%M:%S')
+            'creation_time': datetime.fromtimestamp(os.path.getctime(image_path)).strftime('%Y-%m-%d %H:%M:%S'),
+            'path': image_path
         }
         return image_details
     except Exception as e:
         print(f"Error processing image {image_path}: {e}")
         return None
 
-# Function to write details to Word file
+# Function to write details & images to Word file
 def write_to_word(image_details, output_path):
     doc = Document()
     doc.add_heading('Screenshot Details', 0)
@@ -30,8 +32,11 @@ def write_to_word(image_details, output_path):
         doc.add_paragraph(f"Format: {detail['format']}")
         doc.add_paragraph(f"Mode: {detail['mode']}")
         doc.add_paragraph(f"Creation Time: {detail['creation_time']}")
-        doc.add_paragraph("-" * 40)
-    
+        
+        # Insert Image
+        doc.add_picture(detail['path'], width=Inches(4))  # Resizing to fit the doc
+        doc.add_paragraph("-" * 40)  # Separator
+
     doc.save(output_path)
 
 # Main function to handle the workflow
@@ -40,7 +45,7 @@ def main():
     cwd = os.getcwd()
 
     # Path to the folder containing screenshots (assuming it's in cwd)
-    folder_name = "screenshots"  # replace with the actual folder name if needed
+    folder_name = "screenshots"  # Replace if necessary
     folder_path = os.path.join(cwd, folder_name)
 
     # Get all PNG files from the folder
@@ -57,11 +62,11 @@ def main():
         if details:
             image_details.append(details)
 
-    # Write the image details to a Word file
+    # Write details & images to a Word file
     output_word_path = os.path.join(cwd, 'screenshot_details.docx')
     write_to_word(image_details, output_word_path)
 
-    print(f"Details written to {output_word_path}")
+    print(f"Word file with images created: {output_word_path}")
 
 if __name__ == '__main__':
     main()
