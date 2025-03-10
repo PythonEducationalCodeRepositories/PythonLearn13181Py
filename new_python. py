@@ -1,75 +1,67 @@
-import numpy as np
-from connection import get_session, get_sentence_embedding
+import os
+from PIL import Image
+from docx import Document
+from datetime import datetime
 
-def cosine_similarity_score(vec1, vec2):
-    """
-    Calculate cosine similarity between two vectors.
-    """
-    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+# Function to get image details
+def get_image_details(image_path):
+    try:
+        image = Image.open(image_path)
+        image_details = {
+            'filename': os.path.basename(image_path),
+            'size': image.size,
+            'format': image.format,
+            'mode': image.mode,
+            'creation_time': datetime.fromtimestamp(os.path.getctime(image_path)).strftime('%Y-%m-%d %H:%M:%S')
+        }
+        return image_details
+    except Exception as e:
+        print(f"Error processing image {image_path}: {e}")
+        return None
 
-def get_most_similar_incident(new_question):
-    """
-    Find the most similar incident based on the query embedding, actions, and suggestions.
-    """
-    # Generate embedding for the input query
-    new_question_embedding = get_sentence_embedding(new_question)
-    new_action_embedding = get_sentence_embedding("Action: " + new_question)
-    new_suggestion_embedding = get_sentence_embedding("Suggestion: " + new_question)
+# Function to write details to Word file
+def write_to_word(image_details, output_path):
+    doc = Document()
+    doc.add_heading('Screenshot Details', 0)
 
-    if new_question_embedding is None or not isinstance(new_question_embedding, np.ndarray):
-        raise ValueError("Failed to generate a valid embedding for the query.")
+    for detail in image_details:
+        doc.add_paragraph(f"Filename: {detail['filename']}")
+        doc.add_paragraph(f"Size: {detail['size']}")
+        doc.add_paragraph(f"Format: {detail['format']}")
+        doc.add_paragraph(f"Mode: {detail['mode']}")
+        doc.add_paragraph(f"Creation Time: {detail['creation_time']}")
+        doc.add_paragraph("-" * 40)
+    
+    doc.save(output_path)
 
-    with get_session() as session:
-        with session.begin_transaction() as tx:
-            # Query to fetch incidents and their embeddings
-            query = """
-            MATCH (incident:Incident)-[:HAS_ACTION]->(action:Action)
-            RETURN incident.what_happened AS what_happened,
-                   action.actions_taken AS actions_taken,
-                   action.suggestions AS suggestions,
-                   incident.embedding_what_happened AS embedding_what_happened,
-                   action.embedding_actions_taken AS embedding_actions_taken,
-                   action.embedding_suggestions AS embedding_suggestions
-            """
-            result = tx.run(query)
+# Main function to handle the workflow
+def main():
+    # Get the current working directory
+    cwd = os.getcwd()
 
-            # Initialize variables to track the most similar incident
-            max_similarity = -1
-            most_similar_incident = None
-            most_similar_actions_taken = None
-            most_similar_suggestions = None
+    # Path to the folder containing screenshots (assuming it's in cwd)
+    folder_name = "screenshots"  # replace with the actual folder name if needed
+    folder_path = os.path.join(cwd, folder_name)
 
-            # Iterate through all incidents and calculate similarity
-            for record in result:
-                # Retrieve embeddings for what_happened, actions_taken, and suggestions
-                embedding_what_happened = np.array(record["embedding_what_happened"])
-                embedding_actions_taken = np.array(record["embedding_actions_taken"])
-                embedding_suggestions = np.array(record["embedding_suggestions"])
+    # Get all PNG files from the folder
+    png_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.png')]
+    png_file_paths = [os.path.join(folder_path, f) for f in png_files]
 
-                # Skip if any embedding is missing
-                if embedding_what_happened is None or embedding_actions_taken is None or embedding_suggestions is None:
-                    continue
+    # Sort files by creation time (ascending order)
+    png_file_paths.sort(key=lambda x: os.path.getctime(x))
 
-                # Calculate similarity for each embedding
-                similarity_what_happened = cosine_similarity_score(new_question_embedding, embedding_what_happened)
-                similarity_actions = cosine_similarity_score(new_action_embedding, embedding_actions_taken)
-                similarity_suggestions = cosine_similarity_score(new_suggestion_embedding, embedding_suggestions)
+    # Get the details of each image
+    image_details = []
+    for file_path in png_file_paths:
+        details = get_image_details(file_path)
+        if details:
+            image_details.append(details)
 
-                # Combine similarities (weighted average)
-                total_similarity = (
-                    0.5 * similarity_what_happened +  # Higher weight for "what happened"
-                    0.3 * similarity_actions +       # Medium weight for "actions taken"
-                    0.2 * similarity_suggestions     # Lower weight for "suggestions"
-                )
+    # Write the image details to a Word file
+    output_word_path = os.path.join(cwd, 'screenshot_details.docx')
+    write_to_word(image_details, output_word_path)
 
-                # Update the most similar incident if this one is better
-                if total_similarity > max_similarity:
-                    max_similarity = total_similarity
-                    most_similar_incident = record["what_happened"]
-                    most_similar_actions_taken = record["actions_taken"]
-                    most_similar_suggestions = record["suggestions"]
+    print(f"Details written to {output_word_path}")
 
-    if max_similarity == -1:
-        return None, None, None, None  # No valid match found
-
-    return most_similar_incident, most_similar_actions_taken, most_similar_suggestions, max_similarity
+if __name__ == '__main__':
+    main()
