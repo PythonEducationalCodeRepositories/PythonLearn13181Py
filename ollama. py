@@ -1,80 +1,77 @@
-import requests
+import streamlit as st
+from pdfminer.high_level import extract_text
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain.chains import RetrievalQA
+import tempfile
+import httpx
 
-def generate_with_ollama(prompt, model="mistral", tokens=100, temperature=0.7):
-    """
-    Generate text using an Ollama model with custom tokens and temperature.
-    
-    Parameters:
-    - prompt: The input text for the model.
-    - model: The name of the model (e.g., "mistral", "llama2").
-    - tokens: Maximum number of tokens in the output.
-    - temperature: Controls the randomness of the output.
-    """
-    url = "http://localhost:11434/api/generate"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "tokens": tokens,
-        "temperature": temperature
-    }
+st.set_page_config(page_title="RAG PDF Summarizer", layout="wide")
 
-    response = requests.post(url, json=payload, headers=headers)
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "vectordb" not in st.session_state:
+    st.session_state.vectordb = None
+if "rag_chain" not in st.session_state:
+    st.session_state.rag_chain = None
 
-    if response.status_code == 200:
-        return response.json().get("response", "").strip()
-    else:
-        raise Exception(f"Error: {response.status_code}, {response.text}")
+with st.sidebar:
+    st.header("📚 RAG Summarizer Settings")
+    api_key = st.text_input("API Key", type="password")
+    base_url = st.text_input("Base URL")
+    llm_model = st.text_input("LLM Model")
+    embed_model = st.text_input("Embedding Model")
+    uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
+    st.divider()
+    st.subheader("💬 Chat History")
+    for idx, (q, a) in enumerate(st.session_state.chat_history):
+        with st.expander(f"Q{idx+1}: {q[:30]}..."):
+            st.write(a)
 
-# Example usage
-if __name__ == "__main__":
-    prompt = "Summarize the importance of smaller language models."
-    response = generate_with_ollama(prompt, model="mistral", tokens=50, temperature=0.5)
-    print("Generated Response:", response)
+client = httpx.Client(verify=False)
 
+if api_key and base_url and llm_model and embed_model:
+    llm = ChatOpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        model=llm_model,
+        http_client=client
+    )
+    embedding_model = OpenAIEmbeddings(
+        api_key=api_key,
+        base_url=base_url,
+        model=embed_model,
+        http_client=client
+    )
 
+    if uploaded_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+            temp_file.write(uploaded_file.read())
+            temp_file_path = temp_file.name
 
+        raw_text = extract_text(temp_file_path)
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks = text_splitter.split_text(raw_text)
 
+        with st.spinner("Indexing document..."):
+            vectordb = Chroma.from_texts(chunks, embedding_model, persist_directory="chroma_index")
+            vectordb.persist()
+            st.session_state.vectordb = vectordb
+            st.session_state.rag_chain = RetrievalQA.from_chain_type(
+                llm=llm,
+                retriever=vectordb.as_retriever(search_type="similarity", search_kwargs={"k": 5}),
+                return_source_documents=True
+            )
 
+st.title("📄 RAG-powered PDF Summarizer with Chat")
 
-
-
-import subprocess
-import json
-
-def generate_with_ollama(prompt, model="mistral", tokens=100, temperature=0.7):
-    """
-    Generate text using Ollama locally with custom tokens and temperature.
-
-    Parameters:
-    - prompt: The input text for the model.
-    - model: The name of the Ollama model (e.g., "mistral", "llama2").
-    - tokens: Maximum number of tokens in the output.
-    - temperature: Controls randomness in the output.
-    """
-    # Build the command
-    command = [
-        "ollama", "generate",
-        "--model", model,
-        "--tokens", str(tokens),
-        "--temperature", str(temperature),
-        "--text", prompt
-    ]
-
-    # Run the command and capture the output
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-    # Check for errors
-    if result.returncode != 0:
-        raise Exception(f"Error: {result.stderr.strip()}")
-
-    # Parse and return the response
-    response = result.stdout.strip()
-    return response
-
-# Example usage
-if __name__ == "__main__":
-    prompt = "Summarize the importance of lightweight language models."
-    response = generate_with_ollama(prompt, model="mistral", tokens=50, temperature=0.5)
-    print("Generated Response:", response)
-
+if st.session_state.rag_chain:
+    user_input = st.text_input("Ask a question or request a summary:")
+    if user_input:
+        with st.spinner("Thinking..."):
+            result = st.session_state.rag_chain.invoke(user_input)
+            answer = result["result"]
+            st.session_state.chat_history.append((user_input, answer))
+            st.subheader("Answer")
+            st.write(answer)
