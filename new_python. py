@@ -668,3 +668,80 @@ else:
             current_session["messages"].append(AIMessage(content=response))
             st.chat_message("assistant").write(response)
             st.rerun()
+
+
+
+
+
+
+
+
+
+---------------
+
+
+
+def create_pptx(summary_text: str, filename: str) -> bytes:
+    """Create PowerPoint file with optimized layout"""
+    prs = Presentation()
+    
+    # Title slide
+    title_slide_layout = prs.slide_layouts[0]
+    slide = prs.slides.add_slide(title_slide_layout)
+    title = slide.shapes.title
+    subtitle = slide.placeholders[1]
+    
+    title.text = f"Document Summary"
+    subtitle.text = f"Source: {filename[:30]}{'...' if len(filename) > 30 else ''}"
+    
+    # Process summary into structured content
+    paragraphs = [p.strip() for p in summary_text.split('\n\n') if p.strip()]
+    
+    for para_idx, paragraph in enumerate(paragraphs[:5]):  # Limit to 5 slides
+        # Create content slide
+        slide_layout = prs.slide_layouts[1]  # Title and Content layout
+        slide = prs.slides.add_slide(slide_layout)
+        
+        # Set title
+        title_shape = slide.shapes.title
+        title_shape.text = f"Summary Point {para_idx + 1}"
+        
+        # Add content
+        content_shape = slide.placeholders[1]
+        text_frame = content_shape.text_frame
+        text_frame.clear()
+        
+        # Split long paragraphs into bullet points
+        sentences = paragraph.split('. ')
+        
+        for sent_idx, sentence in enumerate(sentences[:6]):  # Max 6 bullets per slide
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+                
+            # Ensure sentence ends with period
+            if not sentence.endswith('.') and not sentence.endswith('!') and not sentence.endswith('?'):
+                sentence += '.'
+            
+            # Limit sentence length
+            if len(sentence) > 100:
+                sentence = sentence[:97] + '...'
+            
+            if sent_idx == 0:
+                text_frame.text = sentence
+                p = text_frame.paragraphs[0]
+            else:
+                p = text_frame.add_paragraph()
+                p.text = sentence
+            
+            # Format paragraph
+            p.font.size = Pt(14)
+            p.font.name = 'Calibri'
+            p.level = 0
+            p.space_after = Pt(6)
+    
+    # Save to bytes
+    pptx_io = BytesIO()
+    prs.save(pptx_io)
+    pptx_io.seek(0)
+    return pptx_io.read()
