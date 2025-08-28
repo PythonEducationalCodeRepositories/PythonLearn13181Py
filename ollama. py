@@ -1,84 +1,213 @@
 import streamlit as st
-from pdfminer.high_level import extract_text
+from typing import TypedDict, List, Union
+import tempfile
+import os
+import httpx
+import tiktoken
+
+# LangChain imports
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langgraph.graph import StateGraph, START, END
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain.chains import ConversationalRetrievalChain
-import tempfile
-import httpx
+from langchain.chains.retrieval_qa.base import RetrievalQA
 
-st.set_page_config(page_title="RAG PDF Chatbot", layout="wide")
+# PDF processing
+from pdfplumber.high_level import extract_text
 
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+# Configuration Variables
+API_KEY = "your_api_key_here"
+BASE_URL = "your_base_url_here"
+CHAT_MODEL = "your_chat_model_here"
+EMBEDDING_MODEL = "your_embedding_model_here"
+
+# Streamlit page configuration
+st.set_page_config(page_title='RAG PDF Summarizer Chatbot', layout='wide')
+
+# Tiktoken configuration
+tiktoken_cache_dir = "./token"
+os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
+
+# HTTP client
+client = httpx.Client(verify=False)
+
+# Initialize session state
+if "messages" not in st.session_state:
+    # Start with system prompt as LangChain SystemMessage object
+    system_prompt = (
+        "You are a helpful assistant. If the user wants to summarize a PDF, "
+        "prompt them to upload one. Otherwise, answer questions concisely."
+    )
+    st.session_state.messages = [SystemMessage(content=system_prompt)]
+
 if "rag_chain" not in st.session_state:
     st.session_state.rag_chain = None
 
-with st.sidebar:
-    st.header("📂 Upload Document")
-    uploaded_file = st.file_uploader("Upload a PDF", type="pdf")
-    if uploaded_file:
-        st.success(f"✅ {uploaded_file.name} uploaded successfully!")
-    start_chat = st.button("🚀 Start Chat")
-    clear_history = st.button("🗑️ Clear Chat History")
-    st.divider()
-    st.subheader("💬 Conversation History")
-    for idx, (q, a) in enumerate(st.session_state.chat_history):
-        with st.expander(f"Q{idx+1}: {q[:30]}..."):
-            st.write(a)
+if "rag_ready" not in st.session_state:
+    st.session_state.rag_ready = False
 
-if clear_history:
-    st.session_state.chat_history = []
+if "expecting_pdf" not in st.session_state:
+    st.session_state.expecting_pdf = False
 
-client = httpx.Client(verify=False)
-
-llm = ChatOpenAI(
-    api_key="YOUR_API_KEY",
-    base_url="YOUR_BASE_URL",
-    model="YOUR_LLM_MODEL",
-    http_client=client
-)
-
-embedding_model = OpenAIEmbeddings(
-    api_key="YOUR_API_KEY",
-    base_url="YOUR_BASE_URL",
-    model="YOUR_EMBED_MODEL",
-    http_client=client
-)
-
-if uploaded_file and start_chat:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-        temp_file.write(uploaded_file.read())
-        temp_file_path = temp_file.name
-
-    raw_text = extract_text(temp_file_path)
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = text_splitter.split_text(raw_text)
-
-    with st.spinner("Indexing document..."):
-        vectordb = Chroma.from_texts(chunks, embedding_model, persist_directory="chroma_index")
-        vectordb.persist()
-        retriever = vectordb.as_retriever(search_type="similarity", search_kwargs={"k": 5})
-        st.session_state.rag_chain = ConversationalRetrievalChain.from_llm(
-            llm=llm,
-            retriever=retriever,
-            return_source_documents=True
-        )
-
-st.title("🤖 Continuous RAG-powered PDF Chatbot")
-
-if st.session_state.rag_chain:
-    user_input = st.chat_input("Ask something...")
-    if user_input:
-        with st.spinner("Bot is thinking..."):
-            result = st.session_state.rag_chain.invoke(
-                {"question": user_input, "chat_history": st.session_state.chat_history}
+# Helper function to display chat messages
+def display_chat(messages: List[Union[HumanMessage, AIMessage, SystemMessage]]):
+    st.markdown("### Chat History")
+    # Show oldest first (top to bottom)
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            st.markdown(
+                f"<div style='text-align: left; background-color: #f0f2f6; padding: 12px; border-radius: 10px; margin: 5px 0;'>"
+                f"<strong>You:</strong> {msg.content}</div>",
+                unsafe_allow_html=True
             )
-            answer = result["answer"]
-            st.session_state.chat_history.append((user_input, answer))
+        elif isinstance(msg, AIMessage):
+            st.markdown(
+                f"<div style='text-align: right; background-color: #d3f9d8; padding: 12px; border-radius: 10px; margin: 5px 0;'>"
+                f"<strong>AI:</strong> {msg.content}</div>",
+                unsafe_allow_html=True
+            )
+        elif isinstance(msg, SystemMessage):
+            # Optionally skip system messages or display differently
+            pass
 
-    for q, a in st.session_state.chat_history:
-        with st.chat_message("user"):
-            st.write(q)
-        with st.chat_message("assistant"):
-            st.write(a)
+# Detect if last user message contains RAG keywords
+def last_user_message_contains_keywords(keywords):
+    # Find last HumanMessage content
+    for msg in reversed(st.session_state.messages):
+        if isinstance(msg, HumanMessage):
+            content_lower = msg.content.lower()
+            return any(k in content_lower for k in keywords)
+    return False
+
+# Page title
+st.title("🤖 RAG PDF Summarizer AI Chatbot")
+
+# Main Logic
+rag_keywords = ["pdf", "summarize", "summarizer"]
+
+# If expecting pdf and rag not ready, show uploader
+if st.session_state.expecting_pdf and not st.session_state.rag_ready:
+    st.subheader("📄 Upload a PDF file to summarize")
+    
+    uploaded_file = st.file_uploader("Upload your PDF here", type="pdf")
+    
+    if uploaded_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(uploaded_file.read())
+            temp_pdf_path = tmp.name
+        
+        with st.spinner("Extracting and processing PDF..."):
+            # Extract text from PDF
+            raw_text = extract_text(temp_pdf_path)
+            
+            # Split text into chunks
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000, 
+                chunk_overlap=200
+            )
+            chunks = text_splitter.split_text(raw_text)
+            
+            # Embedding model
+            embedding_model = OpenAIEmbeddings(
+                base_url=BASE_URL,
+                model=EMBEDDING_MODEL,
+                api_key=API_KEY,
+                http_client=client
+            )
+            
+            # Create vector database
+            vectordb = Chroma.from_texts(
+                chunks, 
+                embedding_model, 
+                persist_directory="./chroma_index"
+            )
+            vectordb.persist()
+            
+            # LLM model
+            llm = ChatOpenAI(
+                base_url=BASE_URL,
+                model=CHAT_MODEL,
+                api_key=API_KEY,
+                http_client=client
+            )
+            
+            # Create RAG chain
+            retriever = vectordb.as_retriever()
+            rag_chain = RetrievalQA.from_chain_type(
+                llm=llm, 
+                retriever=retriever, 
+                return_source_documents=True
+            )
+            
+            st.session_state.rag_chain = rag_chain
+            st.session_state.rag_ready = True
+            st.success("✅ PDF processed! You can now ask questions about it below.")
+            
+            # Clear expecting PDF since processed
+            st.session_state.expecting_pdf = False
+
+# Display chat history on top
+display_chat(st.session_state.messages)
+
+# Input area
+if st.session_state.rag_ready:
+    prompt = st.chat_input("Ask a question about the uploaded PDF...")
+    if prompt:
+        # Save user message
+        st.session_state.messages.append(HumanMessage(content=prompt))
+        
+        with st.spinner("🔍 Querying RAG model..."):
+            result = st.session_state.rag_chain.invoke(prompt)
+            answer = result["result"]
+            
+            st.session_state.messages.append(AIMessage(content=answer))
+            st.rerun()
+
+else:
+    prompt = st.chat_input("Ask me anything...")
+    if prompt:
+        # Save user message
+        st.session_state.messages.append(HumanMessage(content=prompt))
+        
+        # Check if user wants to start PDF summarization
+        if any(keyword in prompt.lower() for keyword in rag_keywords):
+            st.session_state.expecting_pdf = True
+            st.rerun()
+        else:
+            # Setup Chat LLM
+            chat = ChatOpenAI(
+                base_url=BASE_URL,
+                api_key=API_KEY,
+                temperature=0.7,
+                model=CHAT_MODEL,
+                http_client=client
+            )
+            
+            # Agent State class
+            class AgentState(TypedDict):
+                messages: List[Union[HumanMessage, AIMessage, SystemMessage]]
+            
+            # First node function
+            def first_node(state: AgentState) -> AgentState:
+                response = chat.invoke(state["messages"])
+                state["messages"].append(AIMessage(content=response.content))
+                return state
+            
+            # Create and compile graph
+            graph = StateGraph(AgentState)
+            graph.add_node("node1", first_node)
+            graph.add_edge(START, "node1")
+            graph.add_edge("node1", END)
+            
+            agent = graph.compile()
+            
+            # Convert all messages in session state to LangChain message objects
+            state_input = {"messages": st.session_state.messages.copy()}
+            
+            result = agent.invoke(state_input)
+            response = result["messages"][-1].content
+            
+            # Append AI response to messages
+            st.session_state.messages.append(AIMessage(content=response))
+            st.rerun()
