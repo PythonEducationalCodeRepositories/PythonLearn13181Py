@@ -20,10 +20,9 @@ from fpdf import FPDF
 import spacy
 import docx
 from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-import uuid
-import shutil
 
 # Configuration Variables
 API_KEY = "your-api-key-here"
@@ -65,13 +64,7 @@ st.set_page_config(page_title='RAG PDF Summarizer Chatbot', layout='wide')
 
 tiktoken_cache_dir = "./token"
 os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
-
-# Create httpx client
-@st.cache_resource
-def get_http_client():
-    return httpx.Client(verify=False, timeout=30.0)
-
-client = get_http_client()
+client = httpx.Client(verify=False)
 
 # Load NER model
 @st.cache_resource
@@ -79,7 +72,7 @@ def load_ner_model():
     try:
         return spacy.load("en_core_web_sm")
     except IOError:
-        st.warning("spaCy English model not found. Install with: python -m spacy download en_core_web_sm")
+        st.error("Please install spaCy English model: python -m spacy download en_core_web_sm")
         return None
 
 nlp = load_ner_model()
@@ -87,163 +80,133 @@ nlp = load_ner_model()
 # Document processing functions
 def extract_text_from_file(file, file_type):
     """Extract text from various file types"""
-    try:
-        if file_type == "pdf":
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(file.getvalue())
-                temp_path = tmp.name
-            text = extract_text(temp_path)
-            os.unlink(temp_path)
-            return text
-        
-        elif file_type == "docx":
-            doc = docx.Document(BytesIO(file.getvalue()))
-            text = []
-            for paragraph in doc.paragraphs:
-                if paragraph.text.strip():
-                    text.append(paragraph.text)
-            return '\n'.join(text)
-        
-        elif file_type == "txt":
-            return file.getvalue().decode('utf-8')
-        
-        else:
-            raise ValueError(f"Unsupported file type: {file_type}")
+    if file_type == "pdf":
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(file.read())
+            temp_path = tmp.name
+        text = extract_text(temp_path)
+        os.unlink(temp_path)
+        return text
     
-    except Exception as e:
-        st.error(f"Error extracting text: {str(e)}")
-        return None
+    elif file_type == "docx":
+        doc = docx.Document(file)
+        text = []
+        for paragraph in doc.paragraphs:
+            text.append(paragraph.text)
+        return '\n'.join(text)
+    
+    elif file_type == "txt":
+        return file.read().decode('utf-8')
+    
+    else:
+        raise ValueError(f"Unsupported file type: {file_type}")
 
 # File generation functions
 def create_pptx(summary_text: str, filename: str) -> bytes:
     """Create PowerPoint file from text"""
-    try:
-        prs = Presentation()
-        
-        # Title slide
-        title_slide_layout = prs.slide_layouts[0]
-        slide = prs.slides.add_slide(title_slide_layout)
-        title = slide.shapes.title
-        subtitle = slide.placeholders[1]
-        title.text = f"Summary: {filename}"
-        subtitle.text = "Generated Summary"
-        
-        # Content slide
-        bullet_slide_layout = prs.slide_layouts[1]
-        slide = prs.slides.add_slide(bullet_slide_layout)
-        shapes = slide.shapes
-        title_shape = shapes.title
-        body_shape = shapes.placeholders[1]
-        
-        title_shape.text = "Key Points"
-        tf = body_shape.text_frame
-        tf.clear()
-        
-        # Add bullet points
-        lines = [line.strip() for line in summary_text.split('\n') if line.strip()]
-        for i, line in enumerate(lines[:10]):  # Limit to 10 points
-            if i == 0:
-                tf.text = line
-            else:
-                p = tf.add_paragraph()
-                p.text = line
-                p.level = 0
-                p.font.size = Pt(14)
-        
-        # Save to bytes
-        pptx_io = BytesIO()
-        prs.save(pptx_io)
-        pptx_io.seek(0)
-        return pptx_io.read()
-    except Exception as e:
-        st.error(f"Error creating PowerPoint: {str(e)}")
-        return None
+    prs = Presentation()
+    
+    # Title slide
+    title_slide_layout = prs.slide_layouts[0]
+    slide = prs.slides.add_slide(title_slide_layout)
+    title = slide.shapes.title
+    subtitle = slide.placeholders[1]
+    title.text = f"Summary: {filename}"
+    subtitle.text = "Generated Summary"
+    
+    # Content slide
+    bullet_slide_layout = prs.slide_layouts[1]
+    slide = prs.slides.add_slide(bullet_slide_layout)
+    shapes = slide.shapes
+    title_shape = shapes.title
+    body_shape = shapes.placeholders[1]
+    
+    title_shape.text = "Key Points"
+    tf = body_shape.text_frame
+    tf.clear()
+    
+    # Add bullet points
+    lines = [line.strip() for line in summary_text.split('\n') if line.strip()]
+    for i, line in enumerate(lines[:10]):  # Limit to 10 points
+        if i == 0:
+            tf.text = line
+        else:
+            p = tf.add_paragraph()
+            p.text = line
+            p.level = 0
+            p.font.size = Pt(14)
+    
+    # Save to bytes
+    pptx_io = BytesIO()
+    prs.save(pptx_io)
+    pptx_io.seek(0)
+    return pptx_io.read()
 
-def create_pdf_summary(text: str, filename: str) -> bytes:
+def create_pdf(text: str, filename: str) -> bytes:
     """Create PDF file from text"""
-    try:
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        
-        # Title
-        pdf.set_font("Arial", 'B', 16)
-        pdf.cell(0, 10, f'Summary: {filename}', ln=True, align='C')
-        pdf.ln(10)
-        
-        # Content
-        pdf.set_font("Arial", size=12)
-        for line in text.split('\n'):
-            if line.strip():
-                try:
-                    pdf.multi_cell(0, 8, line.strip())
-                    pdf.ln(2)
-                except:
-                    # Handle special characters
-                    clean_line = line.encode('latin1', 'replace').decode('latin1')
-                    pdf.multi_cell(0, 8, clean_line)
-                    pdf.ln(2)
-        
-        pdf_output = BytesIO()
-        pdf.output(pdf_output)
-        pdf_output.seek(0)
-        return pdf_output.read()
-    except Exception as e:
-        st.error(f"Error creating PDF: {str(e)}")
-        return None
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # Title
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(0, 10, f'Summary: {filename}', ln=True, align='C')
+    pdf.ln(10)
+    
+    # Content
+    pdf.set_font("Arial", size=12)
+    for line in text.split('\n'):
+        if line.strip():
+            pdf.multi_cell(0, 8, line.strip())
+            pdf.ln(2)
+    
+    pdf_output = BytesIO()
+    pdf.output(pdf_output)
+    pdf_output.seek(0)
+    return pdf_output.read()
 
-def create_chat_history_pdf(messages, session_name):
+def create_chat_history_pdf(messages: List[Union[HumanMessage, AIMessage, SystemMessage]], session_id: str) -> bytes:
     """Create PDF from chat history"""
-    try:
-        buffer = BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=letter)
-        story = []
-        styles = getSampleStyleSheet()
-        
-        # Title
-        title = Paragraph(f"Chat History - {session_name}", styles['Title'])
-        story.append(title)
-        story.append(Spacer(1, 12))
-        
-        # Chat messages
-        for msg in messages[1:]:  # Skip system message
-            if isinstance(msg, HumanMessage):
-                user_text = f"<b>Human:</b> {msg.content}"
-                story.append(Paragraph(user_text, styles['Normal']))
-                story.append(Spacer(1, 6))
-            elif isinstance(msg, AIMessage):
-                ai_text = f"<b>Assistant:</b> {msg.content}"
-                story.append(Paragraph(ai_text, styles['Normal']))
-                story.append(Spacer(1, 12))
-        
-        doc.build(story)
-        buffer.seek(0)
-        return buffer.read()
-    except Exception as e:
-        st.error(f"Error creating chat PDF: {str(e)}")
-        return None
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    story = []
+    styles = getSampleStyleSheet()
+    
+    # Title
+    title = Paragraph(f"Chat History - {session_id}", styles['Title'])
+    story.append(title)
+    story.append(Spacer(1, 12))
+    
+    # Chat messages
+    for msg in messages[1:]:  # Skip system message
+        if isinstance(msg, HumanMessage):
+            user_text = f"<b>Human:</b> {msg.content}"
+            story.append(Paragraph(user_text, styles['Normal']))
+            story.append(Spacer(1, 6))
+        elif isinstance(msg, AIMessage):
+            ai_text = f"<b>Assistant:</b> {msg.content}"
+            story.append(Paragraph(ai_text, styles['Normal']))
+            story.append(Spacer(1, 12))
+    
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.read()
 
 def extract_entities(text: str) -> dict:
     """Extract named entities using spaCy NER"""
     if not nlp:
         return {}
     
-    try:
-        # Limit text size to prevent memory issues
-        text_sample = text[:50000]  
-        doc = nlp(text_sample)
-        entities = {}
-        
-        for ent in doc.ents:
-            if ent.label_ not in entities:
-                entities[ent.label_] = []
-            if ent.text not in entities[ent.label_] and len(entities[ent.label_]) < 10:
-                entities[ent.label_].append(ent.text)
-        
-        return entities
-    except Exception as e:
-        st.error(f"Error extracting entities: {str(e)}")
-        return {}
+    doc = nlp(text)
+    entities = {}
+    
+    for ent in doc.ents:
+        if ent.label_ not in entities:
+            entities[ent.label_] = []
+        if ent.text not in entities[ent.label_]:
+            entities[ent.label_].append(ent.text)
+    
+    return entities
 
 def format_entities_for_display(entities: dict) -> str:
     """Format entities for nice display"""
@@ -275,30 +238,25 @@ def format_entities_for_display(entities: dict) -> str:
     
     return formatted
 
-# Session management functions
-def create_session_structure():
-    """Create standard session structure"""
-    return {
-        "messages": [SystemMessage(content=CHARACTER_PERSONAS["Default Assistant"])],
-        "rag_chain": None,
-        "rag_ready": False,
-        "file_name": None,  # Changed from document_name/pdf_name to file_name
-        "session_type": "chat",
-        "text_chunks": None,
-        "entities": None,
-        "character": "Default Assistant",
-        "vectordb_path": None
-    }
-
+# Initialize session state
 def initialize_session_state():
-    """Initialize all session state variables"""
     if "chat_sessions" not in st.session_state:
         st.session_state.chat_sessions = {}
     
     if "current_session_id" not in st.session_state:
-        session_id = str(uuid.uuid4())[:8]  # Short ID for display
+        session_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         st.session_state.current_session_id = session_id
-        st.session_state.chat_sessions[session_id] = create_session_structure()
+        st.session_state.chat_sessions[session_id] = {
+            "messages": [SystemMessage(content="You are a helpful assistant.")],
+            "rag_chain": None,
+            "rag_ready": False,
+            "pdf_name": None,
+            "session_type": "chat",
+            "text_chunks": None,
+            "entities": None,
+            "all_doc_entities": None,
+            "character": "Default Assistant"
+        }
     
     if "selected_chat_model" not in st.session_state:
         st.session_state.selected_chat_model = CHAT_MODELS[0]
@@ -306,192 +264,73 @@ def initialize_session_state():
     if "selected_embedding_model" not in st.session_state:
         st.session_state.selected_embedding_model = EMBEDDING_MODELS[0]
     
-    # Initialize model parameters
-    if "max_tokens" not in st.session_state:
-        st.session_state.max_tokens = 1000
-    
-    if "temperature" not in st.session_state:
-        st.session_state.temperature = 0.7
-    
     if "show_ner" not in st.session_state:
         st.session_state.show_ner = False
 
 def get_current_session():
-    """Get current session with safety checks"""
-    if st.session_state.current_session_id not in st.session_state.chat_sessions:
-        # If current session doesn't exist, create it
-        st.session_state.chat_sessions[st.session_state.current_session_id] = create_session_structure()
-    
     return st.session_state.chat_sessions[st.session_state.current_session_id]
 
 def create_new_session(session_type="chat"):
-    """Create a new session"""
-    session_id = str(uuid.uuid4())[:8]
-    new_session = create_session_structure()
-    new_session["session_type"] = session_type
-    
-    st.session_state.chat_sessions[session_id] = new_session
+    session_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state.chat_sessions[session_id] = {
+        "messages": [SystemMessage(content="You are a helpful assistant.")],
+        "rag_chain": None,
+        "rag_ready": False,
+        "pdf_name": None,
+        "session_type": session_type,
+        "text_chunks": None,
+        "entities": None,
+        "all_doc_entities": None,
+        "character": "Default Assistant"
+    }
     st.session_state.current_session_id = session_id
-    st.session_state.show_ner = False
     return session_id
 
 def delete_session(session_id):
-    """Delete a session with cleanup"""
-    if len(st.session_state.chat_sessions) > 1 and session_id in st.session_state.chat_sessions:
-        # Clean up vectordb
-        session = st.session_state.chat_sessions[session_id]
-        if session.get("vectordb_path") and os.path.exists(session["vectordb_path"]):
-            try:
-                shutil.rmtree(session["vectordb_path"])
-            except:
-                pass
-        
+    if len(st.session_state.chat_sessions) > 1:
         del st.session_state.chat_sessions[session_id]
-        
         if st.session_state.current_session_id == session_id:
             st.session_state.current_session_id = list(st.session_state.chat_sessions.keys())[0]
 
-# Helper functions
-def display_chat(messages):
-    """Display chat messages"""
+# Helper to display chat messages
+def display_chat(messages: List[Union[HumanMessage, AIMessage, SystemMessage]]):
     for msg in messages[1:]:  # Skip system message
         if isinstance(msg, HumanMessage):
-            with st.chat_message("user"):
-                st.write(msg.content)
+            st.chat_message("user").write(msg.content)
         elif isinstance(msg, AIMessage):
-            with st.chat_message("assistant"):
-                st.write(msg.content)
+            st.chat_message("assistant").write(msg.content)
 
-def generate_document_summary(text_chunks, character_persona):
-    """Generate summary of document chunks"""
-    try:
-        chat = ChatOpenAI(
-            base_url=BASE_URL,
-            api_key=API_KEY,
-            model=st.session_state.selected_chat_model,
-            max_tokens=st.session_state.max_tokens,
-            temperature=st.session_state.temperature,
-            http_client=client
-        )
-        
-        combined_text = "\n".join(text_chunks[:10])
-        summary_prompt = f"""
-        {character_persona}
-        
-        Please provide a comprehensive summary of the following document content:
-        
-        {combined_text}
-        """
-        
-        response = chat.invoke([HumanMessage(content=summary_prompt)])
-        return response.content
-    except Exception as e:
-        st.error(f"Error generating summary: {str(e)}")
-        return None
-
-def process_document(uploaded_file):
-    """Process uploaded document and create RAG chain"""
-    try:
-        # Extract text
-        file_type = uploaded_file.name.split('.')[-1].lower()
-        raw_text = extract_text_from_file(uploaded_file, file_type)
-        
-        if not raw_text or len(raw_text.strip()) < 10:
-            st.error("Could not extract sufficient text from document")
-            return False
-        
-        # Get current session
-        current_session = get_current_session()
-        
-        # Split text into chunks
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000, 
-            chunk_overlap=200,
-            separators=["\n\n", "\n", " ", ""]
-        )
-        chunks = text_splitter.split_text(raw_text)
-        
-        if not chunks:
-            st.error("Could not create text chunks from document")
-            return False
-        
-        # Extract entities
-        entities = extract_entities(raw_text)
-        
-        # Create unique vectordb path
-        vectordb_path = f"./chroma_index_{st.session_state.current_session_id}"
-        
-        # Create embeddings
-        embedding_model = OpenAIEmbeddings(
-            base_url=BASE_URL,
-            model=st.session_state.selected_embedding_model,
-            api_key=API_KEY,
-            http_client=client
-        )
-        
-        # Create vector store
-        vectordb = Chroma.from_texts(
-            chunks, 
-            embedding_model, 
-            persist_directory=vectordb_path
-        )
-        vectordb.persist()
-        
-        # Create LLM
-        llm = ChatOpenAI(
-            base_url=BASE_URL,
-            model=st.session_state.selected_chat_model,
-            max_tokens=st.session_state.max_tokens,
-            temperature=st.session_state.temperature,
-            api_key=API_KEY,
-            http_client=client
-        )
-        
-        # Create RAG chain
-        retriever = vectordb.as_retriever(search_kwargs={"k": 3})
-        rag_chain = RetrievalQA.from_chain_type(
-            llm=llm, 
-            retriever=retriever, 
-            return_source_documents=True
-        )
-        
-        # Update session
-        current_session.update({
-            "rag_chain": rag_chain,
-            "rag_ready": True,
-            "file_name": uploaded_file.name,  # Use consistent key name
-            "text_chunks": chunks,
-            "entities": entities,
-            "vectordb_path": vectordb_path,
-            "session_type": "document"
-        })
-        
-        return True
-        
-    except Exception as e:
-        st.error(f"Error processing document: {str(e)}")
-        return False
+# Generate PDF Summary
+def generate_pdf_summary(text_chunks):
+    chat = ChatOpenAI(
+        base_url=BASE_URL,
+        api_key=API_KEY,
+        model=st.session_state.selected_chat_model,
+        http_client=client
+    )
+    
+    combined_text = "\n".join(text_chunks[:10])  # Limit for summary
+    summary_prompt = f"Please provide a comprehensive summary of the following document content:\n\n{combined_text}"
+    
+    response = chat.invoke([HumanMessage(content=summary_prompt)])
+    return response.content
 
 # Initialize
 initialize_session_state()
 
-# Main UI
-st.title("AI RAG Chat Assistant")
-
 # Sidebar
 with st.sidebar:
-    # Add TEAM A BBSR Logo at the top
-    st.markdown("""
-        <div style='text-align: center; padding: 10px; margin-bottom: 20px; background-color: #f0f2f6; border-radius: 10px;'>
-            <h2 style='color: #1f77b4; margin: 0; font-weight: bold;'>🚀 TEAM A BBSR</h2>
-            <p style='color: #666; margin: 5px 0 0 0; font-size: 12px;'>AI Solutions & Innovation</p>
-        </div>
-    """, unsafe_allow_html=True)
+    # Add TEAM A BBSR branding
+    st.markdown(
+        "<h2 style='text-align:center; color:#004080; margin-bottom:0;'>TEAM A BBSR</h2>"
+        "<h4 style='text-align:center; margin-top:2px;'>Multi-Document RAG Chatbot</h4><hr>",
+        unsafe_allow_html=True,
+    )
     
-    st.header("Settings")
+    st.title("AI Chat Assistant")
     
     # Model Selection
-    st.subheader("Models")
+    st.subheader("Model Settings")
     st.session_state.selected_chat_model = st.selectbox(
         "Chat Model:",
         CHAT_MODELS,
@@ -504,266 +343,282 @@ with st.sidebar:
         index=EMBEDDING_MODELS.index(st.session_state.selected_embedding_model)
     )
     
-    # Model Parameters - Add sliders for tokens and temperature
-    st.subheader("Model Parameters")
-    
-    # Max Tokens Slider
-    st.session_state.max_tokens = st.slider(
-        "Max Tokens:",
-        min_value=50,
-        max_value=4000,
-        value=st.session_state.max_tokens,
-        step=50,
-        help="Maximum number of tokens to generate"
-    )
-    
-    # Temperature Slider
-    st.session_state.temperature = st.slider(
-        "Temperature:",
-        min_value=0.0,
-        max_value=2.0,
-        value=st.session_state.temperature,
-        step=0.1,
-        help="Controls randomness: 0.0 = deterministic, 2.0 = very creative"
-    )
-    
-    # Display current values
-    st.caption(f"Current: {st.session_state.max_tokens} tokens, {st.session_state.temperature} temperature")
-    
     # Character Selection
-    st.subheader("Character")
+    st.subheader("Character Persona")
     current_session = get_current_session()
     selected_character = st.selectbox(
         "Select Character:",
         list(CHARACTER_PERSONAS.keys()),
-        index=list(CHARACTER_PERSONAS.keys()).index(current_session["character"])
+        index=list(CHARACTER_PERSONAS.keys()).index(current_session.get("character", "Default Assistant"))
     )
     
-    # Update character if changed
     if current_session["character"] != selected_character:
         current_session["character"] = selected_character
+        # Update system message with new character
         current_session["messages"][0] = SystemMessage(content=CHARACTER_PERSONAS[selected_character])
     
     st.divider()
     
-    # Document Upload
+    # Multi-Document Upload Section
     st.subheader("Document Upload")
-    uploaded_file = st.file_uploader(
-        "Upload Document", 
-        type=["pdf", "docx", "txt"]
+    uploaded_files = st.file_uploader(
+        "Upload Documents for Analysis (PDF/DOCX/TXT)", 
+        type=["pdf", "docx", "txt"],
+        accept_multiple_files=True,
+        key="multifile"
     )
     
-    if uploaded_file:
-        if st.button("Process Document"):
-            with st.spinner("Processing document..."):
-                # Create new document session
-                create_new_session("document")
-                
-                if process_document(uploaded_file):
-                    st.success("Document processed successfully!")
-                else:
-                    st.error("Failed to process document")
+    if uploaded_files:
+        if st.button("Process Documents"):
+            create_new_session("document")
+            current_session = get_current_session()
+            current_session["pdf_name"] = ", ".join([f.name for f in uploaded_files])
+            
+            with st.spinner("Processing documents..."):
+                try:
+                    all_texts = []
+                    all_entities = {}
+                    
+                    for file in uploaded_files:
+                        file_type = file.name.split('.')[-1].lower()
+                        text = extract_text_from_file(file, file_type)
+                        all_texts.append(text)
+                        
+                        # NER per document
+                        entities = extract_entities(text)
+                        all_entities[file.name] = entities
+                    
+                    # Combine all texts for cross-analysis
+                    combined_text = "\n\n".join(all_texts)
+                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+                    chunks = text_splitter.split_text(combined_text)
+                    
+                    # Embedding model
+                    embedding_model = OpenAIEmbeddings(
+                        base_url=BASE_URL,
+                        model=st.session_state.selected_embedding_model,
+                        api_key=API_KEY,
+                        http_client=client
+                    )
+                    
+                    vectordb = Chroma.from_texts(chunks, embedding_model, persist_directory="./chroma_index")
+                    vectordb.persist()
+                    
+                    # LLM model
+                    llm = ChatOpenAI(
+                        base_url=BASE_URL,
+                        model=st.session_state.selected_chat_model,
+                        api_key=API_KEY,
+                        http_client=client
+                    )
+                    
+                    retriever = vectordb.as_retriever()
+                    rag_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+                    
+                    current_session["rag_chain"] = rag_chain
+                    current_session["rag_ready"] = True
+                    current_session["text_chunks"] = chunks
+                    current_session["all_doc_entities"] = all_entities
+                    
+                    st.success("All documents processed and cross-indexed successfully!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error processing documents: {str(e)}")
     
-    # Document Actions
+    # Document Actions (only show if document is loaded)
     current_session = get_current_session()
     if current_session["rag_ready"]:
-        st.subheader("Document Tools")
+        st.subheader("Document Actions")
         
-        # Download format
-        download_format = st.selectbox("Format:", ["txt", "pdf", "pptx"])
+        # Download format selection
+        download_format = st.selectbox(
+            "Download Format:",
+            ["txt", "pdf", "pptx"],
+            key="download_format"
+        )
         
         col1, col2 = st.columns(2)
         
         with col1:
-            if st.button("Summary"):
-                with st.spinner("Generating..."):
-                    character_persona = CHARACTER_PERSONAS[current_session["character"]]
-                    summary = generate_document_summary(current_session["text_chunks"], character_persona)
+            if st.button("Generate Summary"):
+                with st.spinner("Generating summary..."):
+                    summary = generate_pdf_summary(current_session["text_chunks"])
+                    filename = current_session["pdf_name"].replace(", ", "_").replace(".pdf", "").replace(".docx", "").replace(".txt", "")
                     
-                    if summary:
-                        filename = current_session["file_name"]
-                        if filename and '.' in filename:
-                            filename = filename.rsplit('.', 1)[0]
-                        
-                        if download_format == "txt":
-                            st.download_button(
-                                "Download TXT",
-                                data=summary,
-                                file_name=f"{filename}_summary.txt",
-                                mime="text/plain"
-                            )
-                        elif download_format == "pdf":
-                            pdf_data = create_pdf_summary(summary, filename)
-                            if pdf_data:
-                                st.download_button(
-                                    "Download PDF",
-                                    data=pdf_data,
-                                    file_name=f"{filename}_summary.pdf",
-                                    mime="application/pdf"
-                                )
-                        elif download_format == "pptx":
-                            pptx_data = create_pptx(summary, filename)
-                            if pptx_data:
-                                st.download_button(
-                                    "Download PPTX",
-                                    data=pptx_data,
-                                    file_name=f"{filename}_summary.pptx",
-                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                                )
+                    if download_format == "txt":
+                        st.download_button(
+                            label="Download TXT",
+                            data=summary,
+                            file_name=f"{filename}_summary.txt",
+                            mime="text/plain"
+                        )
+                    elif download_format == "pdf":
+                        pdf_data = create_pdf(summary, filename)
+                        st.download_button(
+                            label="Download PDF",
+                            data=pdf_data,
+                            file_name=f"{filename}_summary.pdf",
+                            mime="application/pdf"
+                        )
+                    elif download_format == "pptx":
+                        pptx_data = create_pptx(summary, filename)
+                        st.download_button(
+                            label="Download PPTX",
+                            data=pptx_data,
+                            file_name=f"{filename}_summary.pptx",
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        )
         
         with col2:
-            if st.button("NER"):
+            if st.button("Show NER"):
                 st.session_state.show_ner = not st.session_state.show_ner
+                st.rerun()
     
     st.divider()
     
     # Session Management
-    st.subheader("Sessions")
+    st.subheader("Chat Sessions")
     
+    # New Chat Button
     if st.button("New Chat"):
         create_new_session("chat")
+        st.rerun()
     
     # Display sessions
     for session_id in list(st.session_state.chat_sessions.keys()):
         session = st.session_state.chat_sessions[session_id]
+        session_type = "Document" if session["session_type"] == "document" else "Chat"
+        session_name = f"{session_type} - {session_id}"
         
-        # Session display name
-        file_name = session.get("file_name")
-        if file_name:
-            display_name = f"📄 {file_name[:20]}..."
-        else:
-            display_name = f"💬 Chat {session_id[:4]}"
+        if session.get("pdf_name"):
+            session_name = f"{session['pdf_name'][:15]}... - {session_id[-8:]}"
         
-        col1, col2, col3 = st.columns([3, 1, 1])
+        col1, col2, col3 = st.columns([2, 1, 1])
         
         with col1:
             if st.button(
-                display_name,
+                session_name,
                 key=f"session_{session_id}",
                 type="primary" if session_id == st.session_state.current_session_id else "secondary"
             ):
                 st.session_state.current_session_id = session_id
-                st.session_state.show_ner = False
+                st.rerun()
         
         with col2:
-            # Download chat history
-            if len(session["messages"]) > 1:
-                chat_pdf = create_chat_history_pdf(session["messages"], session_id[:4])
-                if chat_pdf:
-                    st.download_button(
-                        "D",
-                        data=chat_pdf,
-                        file_name=f"chat_{session_id[:4]}.pdf",
-                        mime="application/pdf",
-                        key=f"dl_{session_id}",
-                        help="Download chat"
-                    )
+            # Chat history download button
+            if len(session["messages"]) > 1:  # More than just system message
+                chat_pdf = create_chat_history_pdf(session["messages"], session_id[-8:])
+                st.download_button(
+                    label="D",
+                    data=chat_pdf,
+                    file_name=f"chat_history_{session_id[-8:]}.pdf",
+                    mime="application/pdf",
+                    key=f"download_chat_{session_id}",
+                    help="Download chat history"
+                )
         
         with col3:
-            if st.button("X", key=f"del_{session_id}", help="Delete"):
+            if st.button("X", key=f"delete_{session_id}", help="Delete session"):
                 delete_session(session_id)
+                st.rerun()
     
-    if st.button("Clear All"):
-        # Clean up vectordbs
-        for session in st.session_state.chat_sessions.values():
-            if session.get("vectordb_path") and os.path.exists(session["vectordb_path"]):
-                try:
-                    shutil.rmtree(session["vectordb_path"])
-                except:
-                    pass
-        
+    # Clear All Chats
+    if st.button("Clear All Chats"):
         st.session_state.chat_sessions = {}
         create_new_session("chat")
-        st.session_state.show_ner = False
+        st.rerun()
 
-# Main content
+# Main Chat Interface
 current_session = get_current_session()
+session_type_icon = "Document" if current_session["session_type"] == "document" else "Chat"
 
-# Display session info
-file_name = current_session.get("file_name")
-if file_name:
-    st.info(f"Document Session: **{file_name}** | Character: **{current_session['character']}** | Tokens: **{st.session_state.max_tokens}** | Temp: **{st.session_state.temperature}**")
+if current_session.get("pdf_name"):
+    st.title(f"{session_type_icon} Chat - {current_session['pdf_name']}")
 else:
-    st.info(f"Chat Session | Character: **{current_session['character']}** | Tokens: **{st.session_state.max_tokens}** | Temp: **{st.session_state.temperature}**")
+    st.title(f"{session_type_icon} AI Chat Assistant")
 
-# Display NER results
-if st.session_state.show_ner and current_session.get("entities"):
-    with st.expander("Named Entity Recognition Results", expanded=True):
+# Display current model info and character
+st.caption(f"Using: {st.session_state.selected_chat_model} | Character: {current_session['character']} | Session: {st.session_state.current_session_id[-8:]}")
+
+# Display NER results in main page if requested (Multi-document support)
+if st.session_state.show_ner and current_session.get("all_doc_entities"):
+    with st.container():
+        st.markdown("### Named Entities Analysis per Document")
+        for docname, entities in current_session["all_doc_entities"].items():
+            st.markdown(f"**{docname}**")
+            entity_display = format_entities_for_display(entities)
+            st.markdown(entity_display)
+        st.divider()
+elif st.session_state.show_ner and current_session.get("entities"):
+    with st.container():
+        st.markdown("### Named Entities Analysis")
         entity_display = format_entities_for_display(current_session["entities"])
         st.markdown(entity_display)
+        st.divider()
 
-# Display chat history
+# Display chat messages
 display_chat(current_session["messages"])
 
 # Chat input
 if current_session["rag_ready"]:
-    # Document chat mode
-    if prompt := st.chat_input("Ask about the document..."):
-        current_session["messages"].append(HumanMessage(content=prompt))
-        with st.chat_message("user"):
-            st.write(prompt)
+    prompt = st.chat_input("Ask a question about the uploaded document(s)...")
+    if prompt:
+        # Add character persona to the prompt
+        character_context = CHARACTER_PERSONAS[current_session["character"]]
+        enhanced_prompt = f"{character_context}\n\nUser question: {prompt}"
         
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                try:
-                    character_context = CHARACTER_PERSONAS[current_session["character"]]
-                    enhanced_prompt = f"{character_context}\n\nUser question: {prompt}"
-                    
-                    result = current_session["rag_chain"].invoke({"query": enhanced_prompt})
-                    answer = result["result"]
-                    
-                    current_session["messages"].append(AIMessage(content=answer))
-                    st.write(answer)
-                    
-                except Exception as e:
-                    error_msg = f"Error: {str(e)}"
-                    current_session["messages"].append(AIMessage(content=error_msg))
-                    st.error(error_msg)
+        # Add user message
+        current_session["messages"].append(HumanMessage(content=prompt))
+        st.chat_message("user").write(prompt)
+        
+        # Generate response
+        with st.spinner("Thinking..."):
+            result = current_session["rag_chain"].invoke(enhanced_prompt)
+            answer = result["result"]
+            current_session["messages"].append(AIMessage(content=answer))
+            st.chat_message("assistant").write(answer)
+            st.rerun()
+
 else:
-    # Regular chat mode
-    if prompt := st.chat_input("Ask me anything..."):
+    prompt = st.chat_input("Ask me anything...")
+    if prompt:
+        # Add user message
         current_session["messages"].append(HumanMessage(content=prompt))
-        with st.chat_message("user"):
-            st.write(prompt)
+        st.chat_message("user").write(prompt)
         
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                try:
-                    chat = ChatOpenAI(
-                        base_url=BASE_URL,
-                        api_key=API_KEY,
-                        temperature=st.session_state.temperature,
-                        max_tokens=st.session_state.max_tokens,
-                        model=st.session_state.selected_chat_model,
-                        http_client=client
-                    )
+        # Generate response
+        with st.spinner("Thinking..."):
+            chat = ChatOpenAI(
+                base_url=BASE_URL,
+                api_key=API_KEY,
+                temperature=0.7,
+                model=st.session_state.selected_chat_model,
+                http_client=client
+            )
 
-                    class AgentState(TypedDict):
-                        messages: List[Union[HumanMessage, AIMessage, SystemMessage]]
+            class AgentState(TypedDict):
+                messages: List[Union[HumanMessage, AIMessage, SystemMessage]]
 
-                    def chat_node(state: AgentState) -> AgentState:
-                        character_context = CHARACTER_PERSONAS[current_session["character"]]
-                        enhanced_messages = state["messages"].copy()
-                        enhanced_messages[0] = SystemMessage(content=character_context)
-                        
-                        response = chat.invoke(enhanced_messages)
-                        state["messages"].append(AIMessage(content=response.content))
-                        return state
+            def first_node(state: AgentState) -> AgentState:
+                # Add character context to the conversation
+                character_context = CHARACTER_PERSONAS[current_session["character"]]
+                enhanced_messages = state["messages"].copy()
+                enhanced_messages[0] = SystemMessage(content=character_context)
+                
+                response = chat.invoke(enhanced_messages)
+                state["messages"].append(AIMessage(content=response.content))
+                return state
 
-                    graph = StateGraph(AgentState)
-                    graph.add_node("chat", chat_node)
-                    graph.add_edge(START, "chat")
-                    graph.add_edge("chat", END)
-                    agent = graph.compile()
+            graph = StateGraph(AgentState)
+            graph.add_node("node1", first_node)
+            graph.add_edge(START, "node1")
+            graph.add_edge("node1", END)
+            agent = graph.compile()
 
-                    state_input = {"messages": current_session["messages"].copy()}
-                    result = agent.invoke(state_input)
-                    response = result["messages"][-1].content
+            state_input = {"messages": current_session["messages"].copy()}
+            result = agent.invoke(state_input)
+            response = result["messages"][-1].content
 
-                    current_session["messages"].append(AIMessage(content=response))
-                    st.write(response)
-                    
-                except Exception as e:
-                    error_msg = f"Error: {str(e)}"
-                    current_session["messages"].append(AIMessage(content=error_msg))
-                    st.error(error_msg)
+            current_session["messages"].append(AIMessage(content=response))
+            st.chat_message("assistant").write(response)
+            st.rerun()
