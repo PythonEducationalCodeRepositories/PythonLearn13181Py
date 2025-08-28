@@ -1,46 +1,670 @@
+from typing import TypedDict, List, Union
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langgraph.graph import StateGraph, START, END
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain.chains.retrieval_qa.base import RetrievalQA
+from pdfplumber.high_level import extract_text
+import tempfile
 import os
-from docx import Document
-from docx.shared import Inches
+import httpx
+import tiktoken
+import streamlit as st
 from datetime import datetime
+import json
+from io import BytesIO
+from pptx import Presentation
+from pptx.util import Pt
+from fpdf import FPDF
+import spacy
+import docx
+import pandas as pd
+import openpyxl
+from docx import Document
 
-# Function to get sorted list of image paths based on creation date and time
-def get_sorted_images(folder_path):
-    png_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.png')]
-    png_file_paths = [os.path.join(folder_path, f) for f in png_files]
+# Configuration Variables
+API_KEY = "your-api-key-here"
+BASE_URL = "https://your-base-url-here"
 
-    # Sort images by creation time (earliest first)
-    png_file_paths.sort(key=lambda x: os.path.getctime(x))
-    
-    return png_file_paths
+# Available Models List
+CHAT_MODELS = [
+    "gpt-4o",
+    "gpt-4o-mini", 
+    "gpt-4-turbo",
+    "gpt-4",
+    "gpt-3.5-turbo",
+    "text-davinci-003",
+    "your-custom-model-1",
+    "your-custom-model-2"
+]
 
-# Function to add images to Word file
-def add_images_to_word(image_paths, output_path):
-    doc = Document()
+EMBEDDING_MODELS = [
+    "text-embedding-ada-002",
+    "text-embedding-3-small",
+    "text-embedding-3-large",
+    "your-custom-embedding-model"
+]
 
-    for img_path in image_paths:
-        creation_time = datetime.fromtimestamp(os.path.getctime(img_path)).strftime('%Y-%m-%d %H:%M:%S')
+# Role Templates
+ROLE_TEMPLATES = {
+    "General Assistant": "You are a helpful AI assistant. Answer questions clearly and concisely.",
+    "Data Analyst": "You are a data analyst. Analyze data, provide insights, identify trends, and make data-driven recommendations.",
+    "Content Writer": "You are a professional content writer. Create engaging, well-structured, and informative content.",
+    "Code Developer": "You are a software developer. Provide clean, efficient code solutions with explanations.",
+    "Business Consultant": "You are a business consultant. Provide strategic advice, analyze business problems, and suggest solutions.",
+    "Research Assistant": "You are a research assistant. Provide thorough, well-researched information with proper analysis.",
+    "Teacher/Educator": "You are an experienced educator. Explain concepts clearly, provide examples, and help with learning.",
+    "Technical Writer": "You are a technical writer. Create clear, accurate technical documentation and explanations.",
+    "Financial Advisor": "You are a financial advisor. Provide financial insights, analysis, and recommendations.",
+    "Custom Role": "You are a specialist in your field. Provide expert-level insights and assistance."
+}
+
+# Configure
+st.set_page_config(page_title='Enhanced RAG Document Chatbot', layout='wide')
+
+tiktoken_cache_dir = "./token"
+os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
+client = httpx.Client(verify=False)
+
+# Load NER model
+@st.cache_resource
+def load_ner_model():
+    try:
+        return spacy.load("en_core_web_sm")
+    except IOError:
+        st.error("Please install spaCy English model: python -m spacy download en_core_web_sm")
+        return None
+
+nlp = load_ner_model()
+
+# Document extraction functions
+def extract_text_from_file(file, file_type):
+    """Extract text from various file types"""
+    try:
+        if file_type == "pdf":
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(file.read())
+                return extract_text(tmp.name)
         
-        # Add image with timestamp
-        doc.add_paragraph(f"Captured On: {creation_time}")
-        doc.add_picture(img_path, width=Inches(4))  # Resize to fit page
-        doc.add_paragraph("\n")  # Space between images
+        elif file_type == "docx":
+            doc = Document(file)
+            return "\n".join([paragraph.text for paragraph in doc.paragraphs])
+        
+        elif file_type == "txt":
+            return file.read().decode('utf-8')
+        
+        elif file_type in ["xlsx", "xls"]:
+            df = pd.read_excel(file)
+            return df.to_string()
+        
+        elif file_type == "csv":
+            df = pd.read_csv(file)
+            return df.to_string()
+        
+        else:
+            return "Unsupported file type"
+    
+    except Exception as e:
+        st.error(f"Error extracting text: {str(e)}")
+        return None
 
-    doc.save(output_path)
+# Chat history export functions
+def export_chat_history_text(messages, session_info):
+    """Export chat history as plain text"""
+    content = f"Chat Session Export\n"
+    content += f"Session ID: {session_info['session_id']}\n"
+    content += f"Role: {session_info['role']}\n"
+    content += f"Document: {session_info['document_name']}\n"
+    content += f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    content += "=" * 50 + "\n\n"
+    
+    for msg in messages[1:]:  # Skip system message
+        if isinstance(msg, HumanMessage):
+            content += f"USER: {msg.content}\n\n"
+        elif isinstance(msg, AIMessage):
+            # Remove emojis from AI messages
+            clean_content = ''.join(char for char in msg.content if ord(char) < 127)
+            content += f"ASSISTANT: {clean_content}\n\n"
+    
+    return content
 
-# Main function
-def main():
-    cwd = os.getcwd()
-    folder_name = "screenshots"  # Folder containing images
-    folder_path = os.path.join(cwd, folder_name)
+def export_chat_history_pdf(messages, session_info):
+    """Export chat history as PDF"""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(0, 10, 'Chat Session Export', ln=True, align='C')
+    pdf.ln(5)
+    
+    # Session info
+    pdf.set_font("Arial", size=10)
+    pdf.cell(0, 5, f'Session ID: {session_info["session_id"]}', ln=True)
+    pdf.cell(0, 5, f'Role: {session_info["role"]}', ln=True)
+    pdf.cell(0, 5, f'Document: {session_info["document_name"]}', ln=True)
+    pdf.cell(0, 5, f'Export Date: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}', ln=True)
+    pdf.ln(10)
+    
+    # Chat messages
+    pdf.set_font("Arial", size=12)
+    for msg in messages[1:]:  # Skip system message
+        if isinstance(msg, HumanMessage):
+            pdf.set_font("Arial", 'B', 12)
+            pdf.cell(0, 8, 'USER:', ln=True)
+            pdf.set_font("Arial", size=10)
+            pdf.multi_cell(0, 6, msg.content)
+            pdf.ln(3)
+        elif isinstance(msg, AIMessage):
+            pdf.set_font("Arial", 'B', 12)
+            pdf.cell(0, 8, 'ASSISTANT:', ln=True)
+            pdf.set_font("Arial", size=10)
+            # Remove emojis from AI messages
+            clean_content = ''.join(char for char in msg.content if ord(char) < 127)
+            pdf.multi_cell(0, 6, clean_content)
+            pdf.ln(3)
+    
+    pdf_output = BytesIO()
+    pdf.output(pdf_output)
+    pdf_output.seek(0)
+    return pdf_output.read()
 
-    # Get sorted image paths
-    image_paths = get_sorted_images(folder_path)
+# File generation functions (keeping existing ones)
+def create_pptx(summary_text: str, filename: str) -> bytes:
+    """Create PowerPoint file from text"""
+    prs = Presentation()
+    
+    # Title slide
+    title_slide_layout = prs.slide_layouts[0]
+    slide = prs.slides.add_slide(title_slide_layout)
+    title = slide.shapes.title
+    subtitle = slide.placeholders[1]
+    title.text = f"Summary: {filename}"
+    subtitle.text = "Generated Summary"
+    
+    # Content slide
+    bullet_slide_layout = prs.slide_layouts[1]
+    slide = prs.slides.add_slide(bullet_slide_layout)
+    shapes = slide.shapes
+    title_shape = shapes.title
+    body_shape = shapes.placeholders[1]
+    
+    title_shape.text = "Key Points"
+    tf = body_shape.text_frame
+    tf.clear()
+    
+    # Add bullet points
+    lines = [line.strip() for line in summary_text.split('\n') if line.strip()]
+    for i, line in enumerate(lines[:10]):  # Limit to 10 points
+        if i == 0:
+            tf.text = line
+        else:
+            p = tf.add_paragraph()
+            p.text = line
+            p.level = 0
+            p.font.size = Pt(14)
+    
+    # Save to bytes
+    pptx_io = BytesIO()
+    prs.save(pptx_io)
+    pptx_io.seek(0)
+    return pptx_io.read()
 
-    # Save images to Word file
-    output_word_path = os.path.join(cwd, 'screenshots.docx')
-    add_images_to_word(image_paths, output_word_path)
+def create_pdf(text: str, filename: str) -> bytes:
+    """Create PDF file from text"""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # Title
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(0, 10, f'Summary: {filename}', ln=True, align='C')
+    pdf.ln(10)
+    
+    # Content
+    pdf.set_font("Arial", size=12)
+    for line in text.split('\n'):
+        if line.strip():
+            pdf.multi_cell(0, 8, line.strip())
+            pdf.ln(2)
+    
+    pdf_output = BytesIO()
+    pdf.output(pdf_output)
+    pdf_output.seek(0)
+    return pdf_output.read()
 
-    print(f"Word file created: {output_word_path}")
+def extract_entities(text: str) -> dict:
+    """Extract named entities using spaCy NER"""
+    if not nlp:
+        return {}
+    
+    doc = nlp(text)
+    entities = {}
+    
+    for ent in doc.ents:
+        if ent.label_ not in entities:
+            entities[ent.label_] = []
+        if ent.text not in entities[ent.label_]:
+            entities[ent.label_].append(ent.text)
+    
+    return entities
 
-if __name__ == '__main__':
-    main()
+def format_entities_for_display(entities: dict) -> str:
+    """Format entities for nice display"""
+    if not entities:
+        return "No entities found."
+    
+    formatted = "## Named Entities Found:\n\n"
+    
+    entity_labels = {
+        'PERSON': 'People',
+        'ORG': 'Organizations', 
+        'GPE': 'Places',
+        'MONEY': 'Money',
+        'DATE': 'Dates',
+        'TIME': 'Times',
+        'PRODUCT': 'Products',
+        'EVENT': 'Events',
+        'WORK_OF_ART': 'Works of Art',
+        'LAW': 'Laws',
+        'LANGUAGE': 'Languages'
+    }
+    
+    for label, items in entities.items():
+        display_label = entity_labels.get(label, label)
+        formatted += f"**{display_label}:**\n"
+        for item in items[:5]:  # Limit to 5 per category
+            formatted += f"- {item}\n"
+        formatted += "\n"
+    
+    return formatted
+
+# Initialize session state
+def initialize_session_state():
+    if "chat_sessions" not in st.session_state:
+        st.session_state.chat_sessions = {}
+    
+    if "current_session_id" not in st.session_state:
+        session_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state.current_session_id = session_id
+        st.session_state.chat_sessions[session_id] = {
+            "messages": [SystemMessage(content=ROLE_TEMPLATES["General Assistant"])],
+            "rag_chain": None,
+            "rag_ready": False,
+            "document_name": None,
+            "session_type": "chat",
+            "text_chunks": None,
+            "entities": None,
+            "selected_role": "General Assistant",
+            "custom_role": ""
+        }
+    
+    if "selected_chat_model" not in st.session_state:
+        st.session_state.selected_chat_model = CHAT_MODELS[0]
+    
+    if "selected_embedding_model" not in st.session_state:
+        st.session_state.selected_embedding_model = EMBEDDING_MODELS[0]
+
+def get_current_session():
+    return st.session_state.chat_sessions[st.session_state.current_session_id]
+
+def create_new_session(session_type="chat", role="General Assistant"):
+    session_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state.chat_sessions[session_id] = {
+        "messages": [SystemMessage(content=ROLE_TEMPLATES[role])],
+        "rag_chain": None,
+        "rag_ready": False,
+        "document_name": None,
+        "session_type": session_type,
+        "text_chunks": None,
+        "entities": None,
+        "selected_role": role,
+        "custom_role": ""
+    }
+    st.session_state.current_session_id = session_id
+    return session_id
+
+def delete_session(session_id):
+    if len(st.session_state.chat_sessions) > 1:
+        del st.session_state.chat_sessions[session_id]
+        if st.session_state.current_session_id == session_id:
+            st.session_state.current_session_id = list(st.session_state.chat_sessions.keys())[0]
+
+def update_system_message(session, role, custom_role=""):
+    """Update system message based on selected role"""
+    if role == "Custom Role" and custom_role:
+        system_content = f"You are a {custom_role}. Provide expert assistance in your specialized field."
+    else:
+        system_content = ROLE_TEMPLATES.get(role, ROLE_TEMPLATES["General Assistant"])
+    
+    session["messages"][0] = SystemMessage(content=system_content)
+
+# Helper to display chat messages
+def display_chat(messages: List[Union[HumanMessage, AIMessage, SystemMessage]]):
+    for msg in messages[1:]:  # Skip system message
+        if isinstance(msg, HumanMessage):
+            st.chat_message("user").write(msg.content)
+        elif isinstance(msg, AIMessage):
+            st.chat_message("assistant").write(msg.content)
+
+# Generate document summary
+def generate_document_summary(text_chunks):
+    chat = ChatOpenAI(
+        base_url=BASE_URL,
+        api_key=API_KEY,
+        model=st.session_state.selected_chat_model,
+        http_client=client
+    )
+    
+    combined_text = "\n".join(text_chunks[:10])  # Limit for summary
+    summary_prompt = f"Please provide a comprehensive summary of the following document content:\n\n{combined_text}"
+    
+    response = chat.invoke([HumanMessage(content=summary_prompt)])
+    return response.content
+
+# Initialize
+initialize_session_state()
+
+# Sidebar
+with st.sidebar:
+    st.title("AI Document Chatbot")
+    
+    # Model Selection
+    st.subheader("Model Settings")
+    st.session_state.selected_chat_model = st.selectbox(
+        "Chat Model:",
+        CHAT_MODELS,
+        index=CHAT_MODELS.index(st.session_state.selected_chat_model)
+    )
+    
+    st.session_state.selected_embedding_model = st.selectbox(
+        "Embedding Model:",
+        EMBEDDING_MODELS,
+        index=EMBEDDING_MODELS.index(st.session_state.selected_embedding_model)
+    )
+    
+    st.divider()
+    
+    # Role Customization
+    st.subheader("Role Customization")
+    current_session = get_current_session()
+    
+    selected_role = st.selectbox(
+        "Select AI Role:",
+        list(ROLE_TEMPLATES.keys()),
+        index=list(ROLE_TEMPLATES.keys()).index(current_session["selected_role"])
+    )
+    
+    custom_role_input = ""
+    if selected_role == "Custom Role":
+        custom_role_input = st.text_input(
+            "Define Custom Role:",
+            value=current_session.get("custom_role", ""),
+            placeholder="e.g., marketing specialist, legal advisor, etc."
+        )
+    
+    if st.button("Apply Role"):
+        current_session["selected_role"] = selected_role
+        current_session["custom_role"] = custom_role_input
+        update_system_message(current_session, selected_role, custom_role_input)
+        st.success(f"Role updated to: {selected_role}")
+        st.rerun()
+    
+    st.divider()
+    
+    # Document Upload Section
+    st.subheader("Document Upload")
+    uploaded_file = st.file_uploader(
+        "Upload Document for Analysis", 
+        type=["pdf", "docx", "txt", "xlsx", "xls", "csv"]
+    )
+    
+    if uploaded_file:
+        if st.button("Process Document"):
+            # Create new document session
+            create_new_session("document", current_session["selected_role"])
+            current_session = get_current_session()
+            current_session["document_name"] = uploaded_file.name
+            
+            with st.spinner("Processing document..."):
+                # Determine file type
+                file_extension = uploaded_file.name.split('.')[-1].lower()
+                
+                # Extract text
+                raw_text = extract_text_from_file(uploaded_file, file_extension)
+                
+                if raw_text:
+                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+                    chunks = text_splitter.split_text(raw_text)
+                    
+                    # Extract entities
+                    entities = extract_entities(raw_text)
+                    current_session["entities"] = entities
+                    
+                    # Embedding model
+                    embedding_model = OpenAIEmbeddings(
+                        base_url=BASE_URL,
+                        model=st.session_state.selected_embedding_model,
+                        api_key=API_KEY,
+                        http_client=client
+                    )
+                    
+                    vectordb = Chroma.from_texts(chunks, embedding_model, persist_directory="./chroma_index")
+                    vectordb.persist()
+                    
+                    # LLM model
+                    llm = ChatOpenAI(
+                        base_url=BASE_URL,
+                        model=st.session_state.selected_chat_model,
+                        api_key=API_KEY,
+                        http_client=client
+                    )
+                    
+                    retriever = vectordb.as_retriever()
+                    rag_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+                    
+                    current_session["rag_chain"] = rag_chain
+                    current_session["rag_ready"] = True
+                    current_session["text_chunks"] = chunks
+                    
+                    st.success("Document processed successfully!")
+                    st.rerun()
+                else:
+                    st.error("Failed to extract text from document")
+    
+    # Document Actions (only show if document is loaded)
+    current_session = get_current_session()
+    if current_session["rag_ready"]:
+        st.subheader("Document Actions")
+        
+        # Download format selection
+        download_format = st.selectbox(
+            "Download Format:",
+            ["txt", "pdf", "pptx"],
+            key="download_format"
+        )
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("Generate Summary"):
+                with st.spinner("Generating summary..."):
+                    summary = generate_document_summary(current_session["text_chunks"])
+                    filename = current_session["document_name"].rsplit('.', 1)[0]
+                    
+                    if download_format == "txt":
+                        st.download_button(
+                            label="Download TXT",
+                            data=summary,
+                            file_name=f"{filename}_summary.txt",
+                            mime="text/plain"
+                        )
+                    elif download_format == "pdf":
+                        pdf_data = create_pdf(summary, filename)
+                        st.download_button(
+                            label="Download PDF",
+                            data=pdf_data,
+                            file_name=f"{filename}_summary.pdf",
+                            mime="application/pdf"
+                        )
+                    elif download_format == "pptx":
+                        pptx_data = create_pptx(summary, filename)
+                        st.download_button(
+                            label="Download PPTX",
+                            data=pptx_data,
+                            file_name=f"{filename}_summary.pptx",
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        )
+        
+        with col2:
+            if st.button("Show NER"):
+                if current_session["entities"]:
+                    st.markdown("### Named Entities")
+                    entity_display = format_entities_for_display(current_session["entities"])
+                    st.markdown(entity_display)
+    
+    st.divider()
+    
+    # Chat History Export
+    st.subheader("Chat History Export")
+    export_format = st.selectbox("Export Format:", ["txt", "pdf"])
+    
+    if st.button("Export Chat History"):
+        session_info = {
+            "session_id": st.session_state.current_session_id,
+            "role": current_session["selected_role"],
+            "document_name": current_session.get("document_name", "None")
+        }
+        
+        if export_format == "txt":
+            chat_text = export_chat_history_text(current_session["messages"], session_info)
+            st.download_button(
+                label="Download Chat History (TXT)",
+                data=chat_text,
+                file_name=f"chat_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                mime="text/plain"
+            )
+        else:
+            chat_pdf = export_chat_history_pdf(current_session["messages"], session_info)
+            st.download_button(
+                label="Download Chat History (PDF)",
+                data=chat_pdf,
+                file_name=f"chat_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                mime="application/pdf"
+            )
+    
+    st.divider()
+    
+    # Session Management
+    st.subheader("Chat Sessions")
+    
+    # New Chat Button
+    if st.button("New Chat"):
+        create_new_session("chat", current_session["selected_role"])
+        st.rerun()
+    
+    # Display sessions
+    for session_id in list(st.session_state.chat_sessions.keys()):
+        session = st.session_state.chat_sessions[session_id]
+        session_type = "Document" if session["session_type"] == "document" else "Chat"
+        session_name = f"{session_type} - {session_id}"
+        
+        if session["document_name"]:
+            session_name = f"Doc: {session['document_name'][:15]}... - {session_id[-8:]}"
+        
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            if st.button(
+                session_name,
+                key=f"session_{session_id}",
+                type="primary" if session_id == st.session_state.current_session_id else "secondary"
+            ):
+                st.session_state.current_session_id = session_id
+                st.rerun()
+        
+        with col2:
+            if st.button("Delete", key=f"delete_{session_id}"):
+                delete_session(session_id)
+                st.rerun()
+    
+    # Clear All Chats
+    if st.button("Clear All Chats"):
+        st.session_state.chat_sessions = {}
+        create_new_session("chat")
+        st.rerun()
+
+# Main Chat Interface
+current_session = get_current_session()
+session_type_icon = "Document" if current_session["session_type"] == "document" else "Chat"
+
+if current_session["document_name"]:
+    st.title(f"{session_type_icon} Chat - {current_session['document_name']}")
+else:
+    st.title(f"{session_type_icon} Assistant")
+
+# Display current model and role info
+st.caption(f"Model: {st.session_state.selected_chat_model} | Role: {current_session['selected_role']} | Session: {st.session_state.current_session_id[-8:]}")
+
+# Display NER results if available
+if current_session.get("entities"):
+    with st.expander("Named Entities Found", expanded=False):
+        entity_display = format_entities_for_display(current_session["entities"])
+        st.markdown(entity_display)
+
+# Display chat messages
+display_chat(current_session["messages"])
+
+# Chat input
+if current_session["rag_ready"]:
+    prompt = st.chat_input("Ask a question about the uploaded document...")
+    if prompt:
+        # Add user message
+        current_session["messages"].append(HumanMessage(content=prompt))
+        st.chat_message("user").write(prompt)
+        
+        # Generate response
+        with st.spinner("Thinking..."):
+            result = current_session["rag_chain"].invoke(prompt)
+            answer = result["result"]
+            current_session["messages"].append(AIMessage(content=answer))
+            st.chat_message("assistant").write(answer)
+            st.rerun()
+
+else:
+    prompt = st.chat_input("Ask me anything...")
+    if prompt:
+        # Add user message
+        current_session["messages"].append(HumanMessage(content=prompt))
+        st.chat_message("user").write(prompt)
+        
+        # Generate response
+        with st.spinner("Thinking..."):
+            chat = ChatOpenAI(
+                base_url=BASE_URL,
+                api_key=API_KEY,
+                temperature=0.7,
+                model=st.session_state.selected_chat_model,
+                http_client=client
+            )
+
+            class AgentState(TypedDict):
+                messages: List[Union[HumanMessage, AIMessage, SystemMessage]]
+
+            def first_node(state: AgentState) -> AgentState:
+                response = chat.invoke(state["messages"])
+                state["messages"].append(AIMessage(content=response.content))
+                return state
+
+            graph = StateGraph(AgentState)
+            graph.add_node("node1", first_node)
+            graph.add_edge(START, "node1")
+            graph.add_edge("node1", END)
+            agent = graph.compile()
+
+            state_input = {"messages": current_session["messages"].copy()}
+            result = agent.invoke(state_input)
+            response = result["messages"][-1].content
+
+            current_session["messages"].append(AIMessage(content=response))
+            st.chat_message("assistant").write(response)
+            st.rerun()
