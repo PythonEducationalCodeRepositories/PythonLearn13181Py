@@ -30,6 +30,11 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
+import docx
+from docx import Document
+import re
+import warnings
+warnings.filterwarnings('ignore')
 
 # Configuration Variables
 API_KEY = "your-api-key-here"
@@ -55,7 +60,7 @@ EMBEDDING_MODELS = [
 ]
 
 # Configure
-st.set_page_config(page_title='Advanced RAG PDF Analyzer', layout='wide')
+st.set_page_config(page_title='Universal Document Analyzer', layout='wide')
 
 tiktoken_cache_dir = "./token"
 os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
@@ -72,263 +77,511 @@ def load_ner_model():
 
 nlp = load_ner_model()
 
-# Table extraction functions
-def extract_tables_from_pdf(pdf_file):
-    """Extract tables from PDF using pdfplumber"""
+# Enhanced file processing functions
+def extract_text_from_docx(docx_file):
+    """Extract text from DOCX file"""
+    try:
+        doc = Document(docx_file)
+        full_text = []
+        for paragraph in doc.paragraphs:
+            if paragraph.text.strip():
+                full_text.append(paragraph.text)
+        return "\n".join(full_text)
+    except Exception as e:
+        st.error(f"Error reading DOCX file: {str(e)}")
+        return ""
+
+def extract_tables_from_docx(docx_file):
+    """Extract tables from DOCX file"""
     tables_data = []
-    
-    with pdfplumber.open(pdf_file) as pdf:
-        for page_num, page in enumerate(pdf.pages):
-            tables = page.extract_tables()
-            if tables:
-                for table_idx, table in enumerate(tables):
-                    if table and len(table) > 1:  # Ensure table has header and data
-                        df = pd.DataFrame(table[1:], columns=table[0])
-                        # Clean the dataframe
-                        df = df.dropna(how='all').dropna(axis=1, how='all')
-                        if not df.empty:
-                            table_info = {
-                                'page': page_num + 1,
-                                'table_index': table_idx + 1,
-                                'dataframe': df,
-                                'title': f"Table {table_idx + 1} from Page {page_num + 1}"
-                            }
-                            tables_data.append(table_info)
+    try:
+        doc = Document(docx_file)
+        for table_idx, table in enumerate(doc.tables):
+            if len(table.rows) > 1:  # Ensure table has header and data
+                table_data = []
+                for row in table.rows:
+                    row_data = []
+                    for cell in row.cells:
+                        row_data.append(cell.text.strip())
+                    table_data.append(row_data)
+                
+                if table_data:
+                    df = create_clean_dataframe(table_data)
+                    if not df.empty:
+                        table_info = {
+                            'page': 'Document',
+                            'table_index': table_idx + 1,
+                            'dataframe': df,
+                            'title': f"Table {table_idx + 1} from DOCX"
+                        }
+                        tables_data.append(table_info)
+    except Exception as e:
+        st.error(f"Error extracting tables from DOCX: {str(e)}")
     
     return tables_data
 
+def extract_text_from_txt(txt_file):
+    """Extract text from TXT file"""
+    try:
+        content = txt_file.read()
+        if isinstance(content, bytes):
+            content = content.decode('utf-8', errors='ignore')
+        return content
+    except Exception as e:
+        st.error(f"Error reading TXT file: {str(e)}")
+        return ""
+
+def create_clean_dataframe(table_data):
+    """Create a clean DataFrame with proper column handling"""
+    try:
+        if not table_data or len(table_data) < 2:
+            return pd.DataFrame()
+        
+        # Extract header and data
+        header = table_data[0]
+        data_rows = table_data[1:]
+        
+        # Clean and fix column names
+        clean_header = []
+        for i, col in enumerate(header):
+            if col is None or str(col).strip() == "" or str(col).strip() == 'nan':
+                clean_header.append(f"Column_{i+1}")
+            else:
+                # Clean the column name
+                clean_col = str(col).strip().replace('\n', ' ').replace('\r', ' ')
+                clean_col = re.sub(r'\s+', ' ', clean_col)  # Replace multiple spaces with single space
+                if clean_col == "":
+                    clean_col = f"Column_{i+1}"
+                clean_header.append(clean_col)
+        
+        # Handle duplicate column names
+        seen_cols = {}
+        final_header = []
+        for col in clean_header:
+            if col in seen_cols:
+                seen_cols[col] += 1
+                final_header.append(f"{col}_{seen_cols[col]}")
+            else:
+                seen_cols[col] = 0
+                final_header.append(col)
+        
+        # Ensure all data rows have the same length as header
+        max_cols = len(final_header)
+        clean_data = []
+        
+        for row in data_rows:
+            clean_row = []
+            for i in range(max_cols):
+                if i < len(row):
+                    cell_value = row[i]
+                    if cell_value is None:
+                        clean_row.append("")
+                    else:
+                        # Clean cell value
+                        clean_cell = str(cell_value).strip().replace('\n', ' ').replace('\r', ' ')
+                        clean_row.append(clean_cell)
+                else:
+                    clean_row.append("")
+            clean_data.append(clean_row)
+        
+        # Create DataFrame
+        df = pd.DataFrame(clean_data, columns=final_header)
+        
+        # Remove completely empty rows and columns
+        df = df.dropna(how='all').dropna(axis=1, how='all')
+        
+        # Remove rows where all values are empty strings
+        df = df[~(df == "").all(axis=1)]
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Error creating DataFrame: {str(e)}")
+        return pd.DataFrame()
+
+def extract_tables_from_pdf(pdf_file):
+    """Enhanced PDF table extraction with better error handling"""
+    tables_data = []
+    
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            for page_num, page in enumerate(pdf.pages):
+                try:
+                    tables = page.extract_tables()
+                    if tables:
+                        for table_idx, table in enumerate(tables):
+                            if table and len(table) > 1:  # Ensure table has header and data
+                                df = create_clean_dataframe(table)
+                                if not df.empty and len(df.columns) > 0:
+                                    table_info = {
+                                        'page': page_num + 1,
+                                        'table_index': table_idx + 1,
+                                        'dataframe': df,
+                                        'title': f"Table {table_idx + 1} from Page {page_num + 1}"
+                                    }
+                                    tables_data.append(table_info)
+                except Exception as e:
+                    st.warning(f"Error extracting tables from page {page_num + 1}: {str(e)}")
+                    continue
+    except Exception as e:
+        st.error(f"Error reading PDF file: {str(e)}")
+    
+    return tables_data
+
+def process_uploaded_file(uploaded_file):
+    """Process different file types and extract text and tables"""
+    file_extension = uploaded_file.name.split('.')[-1].lower()
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_extension}") as tmp:
+        tmp.write(uploaded_file.read())
+        temp_file_path = tmp.name
+    
+    text_content = ""
+    tables_data = []
+    
+    try:
+        if file_extension == 'pdf':
+            # Extract text from PDF
+            text_content = extract_text(temp_file_path)
+            # Extract tables from PDF
+            tables_data = extract_tables_from_pdf(temp_file_path)
+            
+        elif file_extension in ['docx', 'doc']:
+            # Extract text from DOCX
+            with open(temp_file_path, 'rb') as f:
+                text_content = extract_text_from_docx(f)
+            # Extract tables from DOCX
+            with open(temp_file_path, 'rb') as f:
+                tables_data = extract_tables_from_docx(f)
+                
+        elif file_extension == 'txt':
+            # Extract text from TXT
+            with open(temp_file_path, 'rb') as f:
+                text_content = extract_text_from_txt(f)
+            # TXT files typically don't have structured tables
+            tables_data = []
+            
+        else:
+            st.error(f"Unsupported file type: {file_extension}")
+            return "", []
+            
+    except Exception as e:
+        st.error(f"Error processing file: {str(e)}")
+        return "", []
+    finally:
+        # Clean up temporary file
+        try:
+            os.unlink(temp_file_path)
+        except:
+            pass
+    
+    return text_content, tables_data
+
 def format_table_for_llm(df, title):
-    """Convert DataFrame to readable format for LLM"""
-    formatted_text = f"\n{title}:\n"
-    formatted_text += f"Shape: {df.shape[0]} rows × {df.shape[1]} columns\n"
-    formatted_text += f"Columns: {', '.join(df.columns.astype(str))}\n\n"
-    formatted_text += df.to_string(index=False)
-    formatted_text += "\n" + "="*50 + "\n"
-    return formatted_text
+    """Convert DataFrame to readable format for LLM with error handling"""
+    try:
+        if df.empty:
+            return f"\n{title}: [Empty table]\n"
+            
+        formatted_text = f"\n{title}:\n"
+        formatted_text += f"Shape: {df.shape[0]} rows × {df.shape[1]} columns\n"
+        formatted_text += f"Columns: {', '.join(df.columns.astype(str))}\n\n"
+        
+        # Limit the display to first 10 rows for LLM context
+        display_df = df.head(10) if len(df) > 10 else df
+        formatted_text += display_df.to_string(index=False)
+        
+        if len(df) > 10:
+            formatted_text += f"\n... ({len(df) - 10} more rows)"
+            
+        formatted_text += "\n" + "="*50 + "\n"
+        return formatted_text
+    except Exception as e:
+        return f"\n{title}: [Error formatting table: {str(e)}]\n"
 
 def analyze_table_with_llm(df, title, chat_model, model_params):
-    """Generate analysis of table using LLM"""
-    chat = ChatOpenAI(
-        base_url=BASE_URL,
-        api_key=API_KEY,
-        model=chat_model,
-        temperature=model_params['temperature'],
-        max_tokens=model_params['max_tokens'],
-        top_p=model_params.get('top_p', 1.0),
-        http_client=client
-    )
-    
-    table_text = format_table_for_llm(df, title)
-    
-    analysis_prompt = f"""
-    Analyze the following table data and provide insights:
-    
-    {table_text}
-    
-    Please provide:
-    1. Summary of the data
-    2. Key insights and patterns
-    3. Notable statistics
-    4. Data quality observations
-    5. Recommendations for further analysis
-    """
-    
-    response = chat.invoke([HumanMessage(content=analysis_prompt)])
-    return response.content
+    """Generate analysis of table using LLM with error handling"""
+    try:
+        chat = ChatOpenAI(
+            base_url=BASE_URL,
+            api_key=API_KEY,
+            model=chat_model,
+            temperature=model_params['temperature'],
+            max_tokens=model_params['max_tokens'],
+            top_p=model_params.get('top_p', 1.0),
+            http_client=client
+        )
+        
+        table_text = format_table_for_llm(df, title)
+        
+        analysis_prompt = f"""
+        Analyze the following table data and provide insights:
+        
+        {table_text}
+        
+        Please provide:
+        1. Summary of the data
+        2. Key insights and patterns
+        3. Notable statistics
+        4. Data quality observations
+        5. Recommendations for further analysis
+        """
+        
+        response = chat.invoke([HumanMessage(content=analysis_prompt)])
+        return response.content
+    except Exception as e:
+        return f"Error analyzing table: {str(e)}"
 
-# Visualization functions
+# Visualization functions (enhanced with error handling)
 def create_table_visualizations(df, title):
-    """Create various visualizations for table data"""
+    """Create various visualizations for table data with error handling"""
     visualizations = []
     
-    # Only create visualizations for numeric columns
-    numeric_columns = df.select_dtypes(include=['number']).columns
-    
-    if len(numeric_columns) > 0:
-        # Bar chart for numeric columns
-        if len(numeric_columns) <= 5:  # Limit to prevent overcrowding
-            fig = px.bar(df, y=numeric_columns.tolist(), 
-                        title=f"{title} - Numeric Data Overview")
-            visualizations.append(("bar_chart", fig))
+    try:
+        if df.empty:
+            return visualizations
+            
+        # Convert columns to numeric where possible
+        numeric_df = df.copy()
+        for col in numeric_df.columns:
+            numeric_df[col] = pd.to_numeric(numeric_df[col], errors='ignore')
         
-        # Correlation heatmap if multiple numeric columns
-        if len(numeric_columns) > 1:
-            corr_matrix = df[numeric_columns].corr()
-            fig = px.imshow(corr_matrix, 
-                           title=f"{title} - Correlation Matrix",
-                           color_continuous_scale='RdBu_r')
-            visualizations.append(("correlation", fig))
+        # Only create visualizations for numeric columns
+        numeric_columns = numeric_df.select_dtypes(include=['number']).columns
         
-        # Distribution plots for first few numeric columns
-        for i, col in enumerate(numeric_columns[:3]):  # Limit to first 3
-            fig = px.histogram(df, x=col, 
-                             title=f"{title} - Distribution of {col}")
-            visualizations.append((f"distribution_{col}", fig))
-    
-    return visualizations
+        if len(numeric_columns) > 0:
+            # Bar chart for numeric columns
+            if len(numeric_columns) <= 5:  # Limit to prevent overcrowding
+                try:
+                    fig = px.bar(numeric_df.head(20), y=numeric_columns.tolist(), 
+                                title=f"{title} - Numeric Data Overview")
+                    visualizations.append(("bar_chart", fig))
+                except Exception as e:
+                    st.warning(f"Could not create bar chart: {str(e)}")
+            
+            # Correlation heatmap if multiple numeric columns
+            if len(numeric_columns) > 1:
+                try:
+                    corr_matrix = numeric_df[numeric_columns].corr()
+                    fig = px.imshow(corr_matrix, 
+                                   title=f"{title} - Correlation Matrix",
+                                   color_continuous_scale='RdBu_r')
+                    visualizations.append(("correlation", fig))
+                except Exception as e:
+                    st.warning(f"Could not create correlation matrix: {str(e)}")
+            
+            # Distribution plots for first few numeric columns
+            for i, col in enumerate(numeric_columns[:3]):  # Limit to first 3
+                try:
+                    # Remove non-numeric values for histogram
+                    clean_data = numeric_df[col].dropna()
+                    if len(clean_data) > 0:
+                        fig = px.histogram(numeric_df, x=col, 
+                                         title=f"{title} - Distribution of {col}")
+                        visualizations.append((f"distribution_{col}", fig))
+                except Exception as e:
+                    st.warning(f"Could not create distribution plot for {col}: {str(e)}")
+        
+        return visualizations
+    except Exception as e:
+        st.error(f"Error creating visualizations: {str(e)}")
+        return []
 
 # File generation functions (enhanced)
 def create_pptx(summary_text: str, filename: str) -> bytes:
     """Create PowerPoint file from text"""
-    prs = Presentation()
-    
-    # Title slide
-    title_slide_layout = prs.slide_layouts[0]
-    slide = prs.slides.add_slide(title_slide_layout)
-    title = slide.shapes.title
-    subtitle = slide.placeholders[1]
-    title.text = f"Summary: {filename}"
-    subtitle.text = "Generated Summary"
-    
-    # Content slide
-    bullet_slide_layout = prs.slide_layouts[1]
-    slide = prs.slides.add_slide(bullet_slide_layout)
-    shapes = slide.shapes
-    title_shape = shapes.title
-    body_shape = shapes.placeholders[1]
-    
-    title_shape.text = "Key Points"
-    tf = body_shape.text_frame
-    tf.clear()
-    
-    # Add bullet points
-    lines = [line.strip() for line in summary_text.split('\n') if line.strip()]
-    for i, line in enumerate(lines[:10]):  # Limit to 10 points
-        if i == 0:
-            tf.text = line
-        else:
-            p = tf.add_paragraph()
-            p.text = line
-            p.level = 0
-            p.font.size = Pt(14)
-    
-    # Save to bytes
-    pptx_io = BytesIO()
-    prs.save(pptx_io)
-    pptx_io.seek(0)
-    return pptx_io.read()
+    try:
+        prs = Presentation()
+        
+        # Title slide
+        title_slide_layout = prs.slide_layouts[0]
+        slide = prs.slides.add_slide(title_slide_layout)
+        title = slide.shapes.title
+        subtitle = slide.placeholders[1]
+        title.text = f"Summary: {filename}"
+        subtitle.text = "Generated Summary"
+        
+        # Content slide
+        bullet_slide_layout = prs.slide_layouts[1]
+        slide = prs.slides.add_slide(bullet_slide_layout)
+        shapes = slide.shapes
+        title_shape = shapes.title
+        body_shape = shapes.placeholders[1]
+        
+        title_shape.text = "Key Points"
+        tf = body_shape.text_frame
+        tf.clear()
+        
+        # Add bullet points
+        lines = [line.strip() for line in summary_text.split('\n') if line.strip()]
+        for i, line in enumerate(lines[:10]):  # Limit to 10 points
+            if i == 0:
+                tf.text = line
+            else:
+                p = tf.add_paragraph()
+                p.text = line
+                p.level = 0
+                p.font.size = Pt(14)
+        
+        # Save to bytes
+        pptx_io = BytesIO()
+        prs.save(pptx_io)
+        pptx_io.seek(0)
+        return pptx_io.read()
+    except Exception as e:
+        st.error(f"Error creating PPTX: {str(e)}")
+        return bytes()
 
 def create_pdf(text: str, filename: str) -> bytes:
     """Create PDF file from text"""
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    
-    # Title
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, f'Summary: {filename}', ln=True, align='C')
-    pdf.ln(10)
-    
-    # Content
-    pdf.set_font("Arial", size=12)
-    for line in text.split('\n'):
-        if line.strip():
-            pdf.multi_cell(0, 8, line.strip())
-            pdf.ln(2)
-    
-    pdf_output = BytesIO()
-    pdf.output(pdf_output)
-    pdf_output.seek(0)
-    return pdf_output.read()
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        
+        # Title
+        pdf.set_font("Arial", 'B', 16)
+        pdf.cell(0, 10, f'Summary: {filename}', ln=True, align='C')
+        pdf.ln(10)
+        
+        # Content
+        pdf.set_font("Arial", size=12)
+        for line in text.split('\n'):
+            if line.strip():
+                # Handle encoding issues
+                try:
+                    pdf.multi_cell(0, 8, line.strip())
+                except UnicodeEncodeError:
+                    # Fallback for special characters
+                    clean_line = line.encode('ascii', 'ignore').decode('ascii')
+                    pdf.multi_cell(0, 8, clean_line)
+                pdf.ln(2)
+        
+        pdf_output = BytesIO()
+        pdf.output(pdf_output)
+        pdf_output.seek(0)
+        return pdf_output.read()
+    except Exception as e:
+        st.error(f"Error creating PDF: {str(e)}")
+        return bytes()
 
 def create_chat_session_pdf(messages: List, session_name: str) -> bytes:
     """Create PDF from chat session with emojis"""
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter)
-    styles = getSampleStyleSheet()
-    story = []
-    
-    # Title
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=18,
-        spaceAfter=30,
-        alignment=TA_CENTER
-    )
-    story.append(Paragraph(f"Chat Session: {session_name}", title_style))
-    story.append(Spacer(1, 12))
-    
-    # Messages
-    user_style = ParagraphStyle(
-        'UserStyle',
-        parent=styles['Normal'],
-        fontSize=11,
-        leftIndent=20,
-        spaceAfter=10,
-        alignment=TA_LEFT
-    )
-    
-    bot_style = ParagraphStyle(
-        'BotStyle',
-        parent=styles['Normal'],
-        fontSize=11,
-        leftIndent=20,
-        spaceAfter=10,
-        alignment=TA_LEFT
-    )
-    
-    for msg in messages[1:]:  # Skip system message
-        if isinstance(msg, HumanMessage):
-            story.append(Paragraph(f"👤 <b>User:</b> {msg.content}", user_style))
-        elif isinstance(msg, AIMessage):
-            story.append(Paragraph(f"🤖 <b>Assistant:</b> {msg.content}", bot_style))
-        story.append(Spacer(1, 6))
-    
-    # Generate timestamp
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    story.append(Spacer(1, 20))
-    story.append(Paragraph(f"Generated on: {timestamp}", styles['Normal']))
-    
-    doc.build(story)
-    buffer.seek(0)
-    return buffer.read()
+    try:
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter)
+        styles = getSampleStyleSheet()
+        story = []
+        
+        # Title
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=18,
+            spaceAfter=30,
+            alignment=TA_CENTER
+        )
+        story.append(Paragraph(f"Chat Session: {session_name}", title_style))
+        story.append(Spacer(1, 12))
+        
+        # Messages
+        user_style = ParagraphStyle(
+            'UserStyle',
+            parent=styles['Normal'],
+            fontSize=11,
+            leftIndent=20,
+            spaceAfter=10,
+            alignment=TA_LEFT
+        )
+        
+        bot_style = ParagraphStyle(
+            'BotStyle',
+            parent=styles['Normal'],
+            fontSize=11,
+            leftIndent=20,
+            spaceAfter=10,
+            alignment=TA_LEFT
+        )
+        
+        for msg in messages[1:]:  # Skip system message
+            try:
+                if isinstance(msg, HumanMessage):
+                    # Clean content for PDF
+                    clean_content = msg.content.encode('ascii', 'ignore').decode('ascii')
+                    story.append(Paragraph(f"User: {clean_content}", user_style))
+                elif isinstance(msg, AIMessage):
+                    # Clean content for PDF
+                    clean_content = msg.content.encode('ascii', 'ignore').decode('ascii')
+                    story.append(Paragraph(f"Assistant: {clean_content}", bot_style))
+                story.append(Spacer(1, 6))
+            except Exception as e:
+                # Skip problematic messages
+                continue
+        
+        # Generate timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        story.append(Spacer(1, 20))
+        story.append(Paragraph(f"Generated on: {timestamp}", styles['Normal']))
+        
+        doc.build(story)
+        buffer.seek(0)
+        return buffer.read()
+    except Exception as e:
+        st.error(f"Error creating chat session PDF: {str(e)}")
+        return bytes()
 
 def extract_entities(text: str) -> dict:
     """Extract named entities using spaCy NER"""
-    if not nlp:
+    try:
+        if not nlp or not text:
+            return {}
+        
+        doc = nlp(text)
+        entities = {}
+        
+        for ent in doc.ents:
+            if ent.label_ not in entities:
+                entities[ent.label_] = []
+            if ent.text not in entities[ent.label_]:
+                entities[ent.label_].append(ent.text)
+        
+        return entities
+    except Exception as e:
+        st.error(f"Error extracting entities: {str(e)}")
         return {}
-    
-    doc = nlp(text)
-    entities = {}
-    
-    for ent in doc.ents:
-        if ent.label_ not in entities:
-            entities[ent.label_] = []
-        if ent.text not in entities[ent.label_]:
-            entities[ent.label_].append(ent.text)
-    
-    return entities
 
 def format_entities_for_display(entities: dict) -> str:
     """Format entities for nice display"""
-    if not entities:
-        return "No entities found."
-    
-    formatted = "## Named Entities Found:\n\n"
-    
-    entity_labels = {
-        'PERSON': '👤 People',
-        'ORG': '🏢 Organizations', 
-        'GPE': '🌍 Places',
-        'MONEY': '💰 Money',
-        'DATE': '📅 Dates',
-        'TIME': '⏰ Times',
-        'PRODUCT': '📦 Products',
-        'EVENT': '🎉 Events',
-        'WORK_OF_ART': '🎨 Works of Art',
-        'LAW': '⚖️ Laws',
-        'LANGUAGE': '🗣️ Languages'
-    }
-    
-    for label, items in entities.items():
-        display_label = entity_labels.get(label, f'📋 {label}')
-        formatted += f"**{display_label}:**\n"
-        for item in items[:5]:  # Limit to 5 per category
-            formatted += f"- {item}\n"
-        formatted += "\n"
-    
-    return formatted
+    try:
+        if not entities:
+            return "No entities found."
+        
+        formatted = "## Named Entities Found:\n\n"
+        
+        entity_labels = {
+            'PERSON': '👤 People',
+            'ORG': '🏢 Organizations', 
+            'GPE': '🌍 Places',
+            'MONEY': '💰 Money',
+            'DATE': '📅 Dates',
+            'TIME': '⏰ Times',
+            'PRODUCT': '📦 Products',
+            'EVENT': '🎉 Events',
+            'WORK_OF_ART': '🎨 Works of Art',
+            'LAW': '⚖️ Laws',
+            'LANGUAGE': '🗣️ Languages'
+        }
+        
+        for label, items in entities.items():
+            display_label = entity_labels.get(label, f'📋 {label}')
+            formatted += f"**{display_label}:**\n"
+            for item in items[:5]:  # Limit to 5 per category
+                formatted += f"- {item}\n"
+            formatted += "\n"
+        
+        return formatted
+    except Exception as e:
+        return f"Error formatting entities: {str(e)}"
 
 # Initialize session state
 def initialize_session_state():
@@ -342,7 +595,8 @@ def initialize_session_state():
             "messages": [SystemMessage(content="You are a helpful assistant.")],
             "rag_chain": None,
             "rag_ready": False,
-            "pdf_name": None,
+            "file_name": None,
+            "file_type": None,
             "session_type": "chat",
             "text_chunks": None,
             "entities": None,
@@ -375,7 +629,8 @@ def create_new_session(session_type="chat"):
         "messages": [SystemMessage(content="You are a helpful assistant.")],
         "rag_chain": None,
         "rag_ready": False,
-        "pdf_name": None,
+        "file_name": None,
+        "file_type": None,
         "session_type": session_type,
         "text_chunks": None,
         "entities": None,
@@ -399,36 +654,39 @@ def display_chat(messages: List[Union[HumanMessage, AIMessage, SystemMessage]]):
         elif isinstance(msg, AIMessage):
             st.chat_message("assistant").write(msg.content)
 
-# Generate PDF Summary
-def generate_pdf_summary(text_chunks):
-    model_params = {
-        'temperature': st.session_state.model_temperature,
-        'max_tokens': st.session_state.model_max_tokens,
-        'top_p': st.session_state.model_top_p
-    }
-    
-    chat = ChatOpenAI(
-        base_url=BASE_URL,
-        api_key=API_KEY,
-        model=st.session_state.selected_chat_model,
-        temperature=model_params['temperature'],
-        max_tokens=model_params['max_tokens'],
-        top_p=model_params['top_p'],
-        http_client=client
-    )
-    
-    combined_text = "\n".join(text_chunks[:10])  # Limit for summary
-    summary_prompt = f"Please provide a comprehensive summary of the following PDF content:\n\n{combined_text}"
-    
-    response = chat.invoke([HumanMessage(content=summary_prompt)])
-    return response.content
+# Generate document summary
+def generate_document_summary(text_chunks):
+    try:
+        model_params = {
+            'temperature': st.session_state.model_temperature,
+            'max_tokens': st.session_state.model_max_tokens,
+            'top_p': st.session_state.model_top_p
+        }
+        
+        chat = ChatOpenAI(
+            base_url=BASE_URL,
+            api_key=API_KEY,
+            model=st.session_state.selected_chat_model,
+            temperature=model_params['temperature'],
+            max_tokens=model_params['max_tokens'],
+            top_p=model_params['top_p'],
+            http_client=client
+        )
+        
+        combined_text = "\n".join(text_chunks[:10])  # Limit for summary
+        summary_prompt = f"Please provide a comprehensive summary of the following document content:\n\n{combined_text}"
+        
+        response = chat.invoke([HumanMessage(content=summary_prompt)])
+        return response.content
+    except Exception as e:
+        return f"Error generating summary: {str(e)}"
 
 # Initialize
 initialize_session_state()
 
 # Sidebar
 with st.sidebar:
-    st.title("🤖 Advanced AI Chat Assistant")
+    st.title("🤖 Universal Document Analyzer")
     
     # Model Selection
     st.subheader("🛠️ Model Settings")
@@ -478,77 +736,88 @@ with st.sidebar:
     
     st.divider()
     
-    # PDF Upload Section
-    st.subheader("📄 PDF Upload")
-    uploaded_file = st.file_uploader("Upload PDF for Analysis", type="pdf")
+    # File Upload Section
+    st.subheader("📄 Document Upload")
+    st.info("Supported formats: PDF, DOCX, DOC, TXT")
+    
+    uploaded_file = st.file_uploader(
+        "Upload Document for Analysis", 
+        type=['pdf', 'docx', 'doc', 'txt']
+    )
     
     if uploaded_file:
-        if st.button("🚀 Process PDF"):
-            # Create new PDF session
-            create_new_session("pdf")
+        if st.button("🚀 Process Document"):
+            # Create new document session
+            create_new_session("document")
             current_session = get_current_session()
-            current_session["pdf_name"] = uploaded_file.name
+            current_session["file_name"] = uploaded_file.name
+            current_session["file_type"] = uploaded_file.name.split('.')[-1].lower()
             
-            with st.spinner("Processing PDF..."):
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                    tmp.write(uploaded_file.read())
-                    temp_pdf_path = tmp.name
-                
-                # Extract text
-                raw_text = extract_text(temp_pdf_path)
-                text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-                chunks = text_splitter.split_text(raw_text)
-                
-                # Extract tables
-                tables_data = extract_tables_from_pdf(temp_pdf_path)
-                current_session["tables"] = tables_data
-                
-                # Extract entities
-                entities = extract_entities(raw_text)
-                current_session["entities"] = entities
-                
-                # Embedding model
-                embedding_model = OpenAIEmbeddings(
-                    base_url=BASE_URL,
-                    model=st.session_state.selected_embedding_model,
-                    api_key=API_KEY,
-                    http_client=client
-                )
-                
-                vectordb = Chroma.from_texts(chunks, embedding_model, persist_directory="./chroma_index")
-                vectordb.persist()
-                
-                # LLM model
-                model_params = {
-                    'temperature': st.session_state.model_temperature,
-                    'max_tokens': st.session_state.model_max_tokens,
-                    'top_p': st.session_state.model_top_p
-                }
-                
-                llm = ChatOpenAI(
-                    base_url=BASE_URL,
-                    model=st.session_state.selected_chat_model,
-                    api_key=API_KEY,
-                    temperature=model_params['temperature'],
-                    max_tokens=model_params['max_tokens'],
-                    top_p=model_params['top_p'],
-                    http_client=client
-                )
-                
-                retriever = vectordb.as_retriever()
-                rag_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
-                
-                current_session["rag_chain"] = rag_chain
-                current_session["rag_ready"] = True
-                current_session["text_chunks"] = chunks
-                
-                st.success(f"✅ PDF processed successfully! Found {len(tables_data)} tables.")
-                st.rerun()
+            with st.spinner("Processing document..."):
+                try:
+                    # Process the uploaded file
+                    raw_text, tables_data = process_uploaded_file(uploaded_file)
+                    
+                    if not raw_text:
+                        st.error("Could not extract text from the document.")
+                        continue
+                    
+                    # Split text into chunks
+                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+                    chunks = text_splitter.split_text(raw_text)
+                    
+                    # Store data in session
+                    current_session["tables"] = tables_data
+                    current_session["text_chunks"] = chunks
+                    
+                    # Extract entities
+                    entities = extract_entities(raw_text)
+                    current_session["entities"] = entities
+                    
+                    # Create embeddings and RAG chain
+                    embedding_model = OpenAIEmbeddings(
+                        base_url=BASE_URL,
+                        model=st.session_state.selected_embedding_model,
+                        api_key=API_KEY,
+                        http_client=client
+                    )
+                    
+                    vectordb = Chroma.from_texts(chunks, embedding_model, persist_directory="./chroma_index")
+                    vectordb.persist()
+                    
+                    # LLM model
+                    model_params = {
+                        'temperature': st.session_state.model_temperature,
+                        'max_tokens': st.session_state.model_max_tokens,
+                        'top_p': st.session_state.model_top_p
+                    }
+                    
+                    llm = ChatOpenAI(
+                        base_url=BASE_URL,
+                        model=st.session_state.selected_chat_model,
+                        api_key=API_KEY,
+                        temperature=model_params['temperature'],
+                        max_tokens=model_params['max_tokens'],
+                        top_p=model_params['top_p'],
+                        http_client=client
+                    )
+                    
+                    retriever = vectordb.as_retriever()
+                    rag_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
+                    
+                    current_session["rag_chain"] = rag_chain
+                    current_session["rag_ready"] = True
+                    
+                    st.success(f"✅ Document processed successfully! Found {len(tables_data)} tables.")
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"Error processing document: {str(e)}")
     
-    # PDF Actions (only show if PDF is loaded)
+    # Document Actions (only show if document is loaded)
     current_session = get_current_session()
     if current_session["rag_ready"]:
-        st.subheader("📊 PDF Actions")
+        st.subheader("📊 Document Actions")
         
         # Download format selection
         download_format = st.selectbox(
@@ -562,32 +831,37 @@ with st.sidebar:
         with col1:
             if st.button("📄 Generate Summary"):
                 with st.spinner("Generating summary..."):
-                    summary = generate_pdf_summary(current_session["text_chunks"])
-                    filename = current_session["pdf_name"].replace(".pdf", "")
-                    
-                    if download_format == "txt":
-                        st.download_button(
-                            label="💾 Download TXT",
-                            data=summary,
-                            file_name=f"{filename}_summary.txt",
-                            mime="text/plain"
-                        )
-                    elif download_format == "pdf":
-                        pdf_data = create_pdf(summary, filename)
-                        st.download_button(
-                            label="💾 Download PDF",
-                            data=pdf_data,
-                            file_name=f"{filename}_summary.pdf",
-                            mime="application/pdf"
-                        )
-                    elif download_format == "pptx":
-                        pptx_data = create_pptx(summary, filename)
-                        st.download_button(
-                            label="💾 Download PPTX",
-                            data=pptx_data,
-                            file_name=f"{filename}_summary.pptx",
-                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                        )
+                    try:
+                        summary = generate_document_summary(current_session["text_chunks"])
+                        filename = current_session["file_name"].split('.')[0]
+                        
+                        if download_format == "txt":
+                            st.download_button(
+                                label="💾 Download TXT",
+                                data=summary,
+                                file_name=f"{filename}_summary.txt",
+                                mime="text/plain"
+                            )
+                        elif download_format == "pdf":
+                            pdf_data = create_pdf(summary, filename)
+                            if pdf_data:
+                                st.download_button(
+                                    label="💾 Download PDF",
+                                    data=pdf_data,
+                                    file_name=f"{filename}_summary.pdf",
+                                    mime="application/pdf"
+                                )
+                        elif download_format == "pptx":
+                            pptx_data = create_pptx(summary, filename)
+                            if pptx_data:
+                                st.download_button(
+                                    label="💾 Download PPTX",
+                                    data=pptx_data,
+                                    file_name=f"{filename}_summary.pptx",
+                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                                )
+                    except Exception as e:
+                        st.error(f"Error generating summary: {str(e)}")
         
         with col2:
             if st.button("🔍 Show NER"):
@@ -613,29 +887,35 @@ with st.sidebar:
                 with col1:
                     if st.button("📊 Analyze Table"):
                         with st.spinner("Analyzing table..."):
-                            model_params = {
-                                'temperature': st.session_state.model_temperature,
-                                'max_tokens': st.session_state.model_max_tokens,
-                                'top_p': st.session_state.model_top_p
-                            }
-                            analysis = analyze_table_with_llm(
-                                selected_table_data['dataframe'], 
-                                selected_table_data['title'],
-                                st.session_state.selected_chat_model,
-                                model_params
-                            )
-                            current_session["table_analyses"][selected_table] = analysis
-                            st.success("Analysis completed!")
+                            try:
+                                model_params = {
+                                    'temperature': st.session_state.model_temperature,
+                                    'max_tokens': st.session_state.model_max_tokens,
+                                    'top_p': st.session_state.model_top_p
+                                }
+                                analysis = analyze_table_with_llm(
+                                    selected_table_data['dataframe'], 
+                                    selected_table_data['title'],
+                                    st.session_state.selected_chat_model,
+                                    model_params
+                                )
+                                current_session["table_analyses"][selected_table] = analysis
+                                st.success("Analysis completed!")
+                            except Exception as e:
+                                st.error(f"Error analyzing table: {str(e)}")
                 
                 with col2:
                     if st.button("💾 Download CSV"):
-                        csv = selected_table_data['dataframe'].to_csv(index=False)
-                        st.download_button(
-                            label="Download CSV",
-                            data=csv,
-                            file_name=f"{selected_table.replace(' ', '_')}.csv",
-                            mime="text/csv"
-                        )
+                        try:
+                            csv = selected_table_data['dataframe'].to_csv(index=False)
+                            st.download_button(
+                                label="Download CSV",
+                                data=csv,
+                                file_name=f"{selected_table.replace(' ', '_')}.csv",
+                                mime="text/csv"
+                            )
+                        except Exception as e:
+                            st.error(f"Error creating CSV: {str(e)}")
                 
                 with col3:
                     if st.button("📈 Visualize"):
@@ -654,11 +934,11 @@ with st.sidebar:
     # Display sessions
     for session_id in list(st.session_state.chat_sessions.keys()):
         session = st.session_state.chat_sessions[session_id]
-        session_type = "📄 PDF" if session["session_type"] == "pdf" else "💬 Chat"
+        session_type = "📄 Doc" if session["session_type"] == "document" else "💬 Chat"
         session_name = f"{session_type} - {session_id}"
         
-        if session["pdf_name"]:
-            session_name = f"📄 {session['pdf_name'][:15]}... - {session_id[-8:]}"
+        if session["file_name"]:
+            session_name = f"📄 {session['file_name'][:15]}... - {session_id[-8:]}"
         
         col1, col2, col3 = st.columns([2, 1, 1])
         
@@ -674,15 +954,19 @@ with st.sidebar:
         with col2:
             # Download chat session button
             if st.button("📥", key=f"download_{session_id}", help="Download chat session as PDF"):
-                session_data = st.session_state.chat_sessions[session_id]
-                pdf_data = create_chat_session_pdf(session_data["messages"], session_name)
-                st.download_button(
-                    label="Download",
-                    data=pdf_data,
-                    file_name=f"chat_session_{session_id[-8:]}.pdf",
-                    mime="application/pdf",
-                    key=f"download_btn_{session_id}"
-                )
+                try:
+                    session_data = st.session_state.chat_sessions[session_id]
+                    pdf_data = create_chat_session_pdf(session_data["messages"], session_name)
+                    if pdf_data:
+                        st.download_button(
+                            label="Download",
+                            data=pdf_data,
+                            file_name=f"chat_session_{session_id[-8:]}.pdf",
+                            mime="application/pdf",
+                            key=f"download_btn_{session_id}"
+                        )
+                except Exception as e:
+                    st.error(f"Error creating download: {str(e)}")
         
         with col3:
             if st.button("🗑️", key=f"delete_{session_id}"):
@@ -697,10 +981,10 @@ with st.sidebar:
 
 # Main Chat Interface
 current_session = get_current_session()
-session_type_icon = "📄" if current_session["session_type"] == "pdf" else "💬"
+session_type_icon = "📄" if current_session["session_type"] == "document" else "💬"
 
-if current_session["pdf_name"]:
-    st.title(f"{session_type_icon} PDF Analysis - {current_session['pdf_name']}")
+if current_session["file_name"]:
+    st.title(f"{session_type_icon} Document Analysis - {current_session['file_name']}")
 else:
     st.title(f"{session_type_icon} AI Chat Assistant")
 
@@ -712,7 +996,13 @@ if current_session.get("tables"):
     with st.expander(f"📋 Extracted Tables ({len(current_session['tables'])} found)", expanded=False):
         for i, table_data in enumerate(current_session["tables"]):
             st.subheader(table_data["title"])
-            st.dataframe(table_data["dataframe"], use_container_width=True)
+            try:
+                st.dataframe(table_data["dataframe"], use_container_width=True)
+            except Exception as e:
+                st.error(f"Error displaying table: {str(e)}")
+                # Show basic info about the table
+                st.write(f"Table shape: {table_data['dataframe'].shape}")
+                st.write(f"Columns: {list(table_data['dataframe'].columns)}")
             
             # Show analysis if available
             if table_data["title"] in current_session["table_analyses"]:
@@ -756,7 +1046,7 @@ display_chat(current_session["messages"])
 
 # Chat input
 if current_session["rag_ready"]:
-    prompt = st.chat_input("Ask a question about the uploaded PDF or its tables...")
+    prompt = st.chat_input("Ask a question about the uploaded document or its tables...")
     if prompt:
         # Add user message
         current_session["messages"].append(HumanMessage(content=prompt))
@@ -764,19 +1054,25 @@ if current_session["rag_ready"]:
         
         # Generate response
         with st.spinner("🤔 Thinking..."):
-            # Add table context if available
-            context_prompt = prompt
-            if current_session["tables"]:
-                table_context = "\n\nAvailable Tables:\n"
-                for table_data in current_session["tables"]:
-                    table_context += format_table_for_llm(table_data["dataframe"], table_data["title"])
-                context_prompt = prompt + table_context
-            
-            result = current_session["rag_chain"].invoke(context_prompt)
-            answer = result["result"]
-            current_session["messages"].append(AIMessage(content=answer))
-            st.chat_message("assistant").write(answer)
-            st.rerun()
+            try:
+                # Add table context if available
+                context_prompt = prompt
+                if current_session["tables"]:
+                    table_context = "\n\nAvailable Tables:\n"
+                    for table_data in current_session["tables"]:
+                        table_context += format_table_for_llm(table_data["dataframe"], table_data["title"])
+                    context_prompt = prompt + table_context
+                
+                result = current_session["rag_chain"].invoke(context_prompt)
+                answer = result["result"]
+                current_session["messages"].append(AIMessage(content=answer))
+                st.chat_message("assistant").write(answer)
+                st.rerun()
+            except Exception as e:
+                error_msg = f"Error generating response: {str(e)}"
+                current_session["messages"].append(AIMessage(content=error_msg))
+                st.chat_message("assistant").write(error_msg)
+                st.rerun()
 
 else:
     prompt = st.chat_input("Ask me anything...")
@@ -787,44 +1083,51 @@ else:
         
         # Generate response
         with st.spinner("🤔 Thinking..."):
-            model_params = {
-                'temperature': st.session_state.model_temperature,
-                'max_tokens': st.session_state.model_max_tokens,
-                'top_p': st.session_state.model_top_p
-            }
-            
-            chat = ChatOpenAI(
-                base_url=BASE_URL,
-                api_key=API_KEY,
-                temperature=model_params['temperature'],
-                max_tokens=model_params['max_tokens'],
-                top_p=model_params['top_p'],
-                model=st.session_state.selected_chat_model,
-                http_client=client
-            )
+            try:
+                model_params = {
+                    'temperature': st.session_state.model_temperature,
+                    'max_tokens': st.session_state.model_max_tokens,
+                    'top_p': st.session_state.model_top_p
+                }
+                
+                chat = ChatOpenAI(
+                    base_url=BASE_URL,
+                    api_key=API_KEY,
+                    temperature=model_params['temperature'],
+                    max_tokens=model_params['max_tokens'],
+                    top_p=model_params['top_p'],
+                    model=st.session_state.selected_chat_model,
+                    http_client=client
+                )
 
-            class AgentState(TypedDict):
-                messages: List[Union[HumanMessage, AIMessage, SystemMessage]]
+                class AgentState(TypedDict):
+                    messages: List[Union[HumanMessage, AIMessage, SystemMessage]]
 
-            def first_node(state: AgentState) -> AgentState:
-                response = chat.invoke(state["messages"])
-                state["messages"].append(AIMessage(content=response.content))
-                return state
+                def first_node(state: AgentState) -> AgentState:
+                    response = chat.invoke(state["messages"])
+                    state["messages"].append(AIMessage(content=response.content))
+                    return state
 
-            graph = StateGraph(AgentState)
-            graph.add_node("node1", first_node)
-            graph.add_edge(START, "node1")
-            graph.add_edge("node1", END)
-            agent = graph.compile()
+                graph = StateGraph(AgentState)
+                graph.add_node("node1", first_node)
+                graph.add_edge(START, "node1")
+                graph.add_edge("node1", END)
+                agent = graph.compile()
 
-            state_input = {"messages": current_session["messages"].copy()}
-            result = agent.invoke(state_input)
-            response = result["messages"][-1].content
+                state_input = {"messages": current_session["messages"].copy()}
+                result = agent.invoke(state_input)
+                response = result["messages"][-1].content
 
-            current_session["messages"].append(AIMessage(content=response))
-            st.chat_message("assistant").write(response)
-            st.rerun()
+                current_session["messages"].append(AIMessage(content=response))
+                st.chat_message("assistant").write(response)
+                st.rerun()
+                
+            except Exception as e:
+                error_msg = f"Error generating response: {str(e)}"
+                current_session["messages"].append(AIMessage(content=error_msg))
+                st.chat_message("assistant").write(error_msg)
+                st.rerun()
 
 # Footer with additional info
 st.divider()
-st.caption("💡 Tips: Upload PDFs to extract tables, analyze data, and create visualizations. Use model parameters to fine-tune responses.")
+st.caption("💡 Tips: Upload PDF, DOCX, DOC, or TXT files to extract tables, analyze data, and create visualizations. Use model parameters to fine-tune responses.")
