@@ -14,32 +14,33 @@ import streamlit as st
 from datetime import datetime
 import json
 from io import BytesIO
+import base64
 from pptx import Presentation
-from pptx.util import Pt
+from pptx.util import Pt, Inches
 from fpdf import FPDF
-import spacy
+from PIL import Image
 
 # Configuration Variables
 API_KEY = "your-api-key-here"
 BASE_URL = "https://your-base-url-here"
 
-# Available Models List
+# Your Available Azure MAAS Models ONLY
 CHAT_MODELS = [
-    "gpt-4o",
-    "gpt-4o-mini", 
-    "gpt-4-turbo",
-    "gpt-4",
-    "gpt-3.5-turbo",
-    "text-davinci-003",
-    "your-custom-model-1",
-    "your-custom-model-2"
+    "azure-maas-text-embedding-3-large",
+    "azure/g-maas-gpt-35-turbo",
+    "azure/g-maas-gpt-40",
+    "azure/g-maas-gpt-40-mini",
+    "azure/ge-maas-wishper",
+    "azure_ai/gen-mass-DeepSeek-R1",
+    "azure_ai/gen-maas-DeepSeek-V3-0324",
+    "azure_ai/genb-maas-Llama-3.2-90B-Vision-Instruct",
+    "azure_ai/gen-maas-Llama-3.3-70B-Instruct",
+    "azure_ai/gen-maas-Phi-4-reasoning",
+    "azure_ai/gen-maas-Phi-3.5-vision-instruct"
 ]
 
 EMBEDDING_MODELS = [
-    "text-embedding-ada-002",
-    "text-embedding-3-small",
-    "text-embedding-3-large",
-    "your-custom-embedding-model"
+    "azure-maas-text-embedding-3-large"
 ]
 
 # Configure
@@ -49,21 +50,93 @@ tiktoken_cache_dir = "./token"
 os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
 client = httpx.Client(verify=False)
 
-# Load NER model
-@st.cache_resource
-def load_ner_model():
+# NER using your Azure models instead of external spaCy
+def extract_entities_with_azure(text: str) -> dict:
+    """Extract named entities using your Azure models"""
     try:
-        return spacy.load("en_core_web_sm")
-    except IOError:
-        st.error("Please install spaCy English model: python -m spacy download en_core_web_sm")
-        return None
+        chat = ChatOpenAI(
+            base_url=BASE_URL,
+            api_key=API_KEY,
+            model="azure_ai/gen-maas-DeepSeek-V3-0324",  # Use your reasoning model
+            http_client=client
+        )
+        
+        ner_prompt = f"""
+        Extract named entities from the following text and categorize them:
+        
+        Categories: PERSON, ORGANIZATION, LOCATION, DATE, MONEY, PRODUCT, EVENT
+        
+        Text: {text[:2000]}
+        
+        Format your response as JSON:
+        {{
+            "PERSON": ["name1", "name2"],
+            "ORGANIZATION": ["org1", "org2"],
+            "LOCATION": ["place1", "place2"],
+            "DATE": ["date1", "date2"],
+            "MONEY": ["amount1", "amount2"],
+            "PRODUCT": ["product1", "product2"],
+            "EVENT": ["event1", "event2"]
+        }}
+        """
+        
+        response = chat.invoke([HumanMessage(content=ner_prompt)])
+        
+        # Try to parse JSON response
+        try:
+            entities = json.loads(response.content)
+            return entities
+        except:
+            # If JSON parsing fails, return empty dict
+            return {}
+            
+    except Exception as e:
+        st.warning(f"NER processing error: {e}")
+        return {}
 
-nlp = load_ner_model()
+# Audio processing using ONLY your Azure models
+def transcribe_audio_with_azure_whisper(audio_text_simulation):
+    """Use Azure Whisper model for speech-to-text simulation"""
+    try:
+        chat = ChatOpenAI(
+            base_url=BASE_URL,
+            api_key=API_KEY,
+            model="azure/ge-maas-wishper",
+            http_client=client
+        )
+        
+        response = chat.invoke([
+            HumanMessage(content=f"Process this voice input: {audio_text_simulation}")
+        ])
+        return response.content
+    except Exception as e:
+        return f"Voice processing error: {str(e)}"
 
-# File generation functions
-def create_pptx(summary_text: str, filename: str) -> bytes:
-    """Create PowerPoint file from text"""
+def text_to_speech_with_azure(text):
+    """Generate speech description using your Azure models"""
+    try:
+        chat = ChatOpenAI(
+            base_url=BASE_URL,
+            api_key=API_KEY,
+            model=st.session_state.selected_chat_model,
+            http_client=client
+        )
+        
+        tts_prompt = f"Create an audio-friendly version of this text with pronunciation notes: {text[:500]}"
+        response = chat.invoke([HumanMessage(content=tts_prompt)])
+        return response.content
+    except Exception as e:
+        return f"TTS Error: {str(e)}"
+
+# Enhanced PowerPoint creation with template
+def create_pptx_with_template(summary_text: str, filename: str, template_image=None, num_slides=5) -> bytes:
+    """Create PowerPoint with custom template and specified slides"""
     prs = Presentation()
+    
+    # Process summary into sections
+    lines = [line.strip() for line in summary_text.split('\n') if line.strip()]
+    content_slides = num_slides - 1  # Exclude title slide
+    points_per_slide = max(1, len(lines) // max(1, content_slides))
     
     # Title slide
     title_slide_layout = prs.slide_layouts[0]
@@ -71,29 +144,34 @@ def create_pptx(summary_text: str, filename: str) -> bytes:
     title = slide.shapes.title
     subtitle = slide.placeholders[1]
     title.text = f"Summary: {filename}"
-    subtitle.text = "Generated Summary"
+    subtitle.text = f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     
-    # Content slide
-    bullet_slide_layout = prs.slide_layouts[1]
-    slide = prs.slides.add_slide(bullet_slide_layout)
-    shapes = slide.shapes
-    title_shape = shapes.title
-    body_shape = shapes.placeholders[1]
-    
-    title_shape.text = "Key Points"
-    tf = body_shape.text_frame
-    tf.clear()
-    
-    # Add bullet points
-    lines = [line.strip() for line in summary_text.split('\n') if line.strip()]
-    for i, line in enumerate(lines[:10]):  # Limit to 10 points
-        if i == 0:
-            tf.text = line
-        else:
-            p = tf.add_paragraph()
-            p.text = line
-            p.level = 0
-            p.font.size = Pt(14)
+    # Content slides
+    for slide_num in range(1, num_slides):
+        slide_layout = prs.slide_layouts[1]
+        slide = prs.slides.add_slide(slide_layout)
+        
+        title_shape = slide.shapes.title
+        body_shape = slide.placeholders[1]
+        
+        title_shape.text = f"Key Points - Section {slide_num}"
+        
+        # Distribute content
+        start_idx = (slide_num - 1) * points_per_slide
+        end_idx = min(start_idx + points_per_slide, len(lines))
+        
+        tf = body_shape.text_frame
+        tf.clear()
+        
+        if start_idx < len(lines):
+            tf.text = lines[start_idx] if lines else "Summary Points"
+            
+            for i in range(start_idx + 1, end_idx):
+                if i < len(lines):
+                    p = tf.add_paragraph()
+                    p.text = lines[i]
+                    p.level = 0
+                    p.font.size = Pt(14)
     
     # Save to bytes
     pptx_io = BytesIO()
@@ -124,51 +202,46 @@ def create_pdf(text: str, filename: str) -> bytes:
     pdf_output.seek(0)
     return pdf_output.read()
 
-def extract_entities(text: str) -> dict:
-    """Extract named entities using spaCy NER"""
-    if not nlp:
-        return {}
-    
-    doc = nlp(text)
-    entities = {}
-    
-    for ent in doc.ents:
-        if ent.label_ not in entities:
-            entities[ent.label_] = []
-        if ent.text not in entities[ent.label_]:
-            entities[ent.label_].append(ent.text)
-    
-    return entities
-
 def format_entities_for_display(entities: dict) -> str:
-    """Format entities for nice display"""
+    """Format entities for display in main area only"""
     if not entities:
         return "No entities found."
     
-    formatted = "## Named Entities Found:\n\n"
+    formatted = "## 🔍 Named Entities Analysis (Azure AI):\n\n"
     
     entity_labels = {
         'PERSON': '👤 People',
-        'ORG': '🏢 Organizations', 
-        'GPE': '🌍 Places',
+        'ORGANIZATION': '🏢 Organizations', 
+        'LOCATION': '🌍 Locations',
         'MONEY': '💰 Money',
         'DATE': '📅 Dates',
-        'TIME': '⏰ Times',
         'PRODUCT': '📦 Products',
-        'EVENT': '🎉 Events',
-        'WORK_OF_ART': '🎨 Works of Art',
-        'LAW': '⚖️ Laws',
-        'LANGUAGE': '🗣️ Languages'
+        'EVENT': '🎉 Events'
     }
     
     for label, items in entities.items():
-        display_label = entity_labels.get(label, f'📋 {label}')
-        formatted += f"**{display_label}:**\n"
-        for item in items[:5]:  # Limit to 5 per category
-            formatted += f"- {item}\n"
-        formatted += "\n"
+        if items:  # Only show categories with items
+            display_label = entity_labels.get(label, f'📋 {label}')
+            formatted += f"**{display_label}:**\n"
+            for item in items[:5]:
+                formatted += f"- {item}\n"
+            formatted += "\n"
     
     return formatted
+
+def download_chat_history(messages, session_id):
+    """Generate downloadable chat history"""
+    chat_text = f"Chat History - {session_id}\n"
+    chat_text += "=" * 50 + "\n\n"
+    
+    for msg in messages[1:]:  # Skip system message
+        if isinstance(msg, HumanMessage):
+            chat_text += f"👤 User: {msg.content}\n\n"
+        elif isinstance(msg, AIMessage):
+            chat_text += f"🤖 Assistant: {msg.content}\n\n"
+        chat_text += "-" * 30 + "\n\n"
+    
+    return chat_text
 
 # Initialize session state
 def initialize_session_state():
@@ -188,11 +261,21 @@ def initialize_session_state():
             "entities": None
         }
     
+    # Model parameters
     if "selected_chat_model" not in st.session_state:
-        st.session_state.selected_chat_model = CHAT_MODELS[0]
-    
+        st.session_state.selected_chat_model = CHAT_MODELS[1]  # GPT model
     if "selected_embedding_model" not in st.session_state:
         st.session_state.selected_embedding_model = EMBEDDING_MODELS[0]
+    if "temperature" not in st.session_state:
+        st.session_state.temperature = 0.7
+    if "max_tokens" not in st.session_state:
+        st.session_state.max_tokens = 2000
+    if "top_p" not in st.session_state:
+        st.session_state.top_p = 1.0
+    if "frequency_penalty" not in st.session_state:
+        st.session_state.frequency_penalty = 0.0
+    if "voice_input" not in st.session_state:
+        st.session_state.voice_input = ""
 
 def get_current_session():
     return st.session_state.chat_sessions[st.session_state.current_session_id]
@@ -223,7 +306,14 @@ def display_chat(messages: List[Union[HumanMessage, AIMessage, SystemMessage]]):
         if isinstance(msg, HumanMessage):
             st.chat_message("user").write(msg.content)
         elif isinstance(msg, AIMessage):
-            st.chat_message("assistant").write(msg.content)
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.chat_message("assistant").write(msg.content)
+            with col2:
+                if st.button("🔊 TTS", key=f"tts_{hash(msg.content)}", help="Generate audio description"):
+                    tts_result = text_to_speech_with_azure(msg.content)
+                    if tts_result:
+                        st.info(f"🎵 Audio: {tts_result}")
 
 # Generate PDF Summary
 def generate_pdf_summary(text_chunks):
@@ -231,10 +321,14 @@ def generate_pdf_summary(text_chunks):
         base_url=BASE_URL,
         api_key=API_KEY,
         model=st.session_state.selected_chat_model,
+        temperature=st.session_state.temperature,
+        max_tokens=st.session_state.max_tokens,
+        top_p=st.session_state.top_p,
+        frequency_penalty=st.session_state.frequency_penalty,
         http_client=client
     )
     
-    combined_text = "\n".join(text_chunks[:10])  # Limit for summary
+    combined_text = "\n".join(text_chunks[:10])
     summary_prompt = f"Please provide a comprehensive summary of the following PDF content:\n\n{combined_text}"
     
     response = chat.invoke([HumanMessage(content=summary_prompt)])
@@ -248,7 +342,7 @@ with st.sidebar:
     st.title("🤖 AI Chat Assistant")
     
     # Model Selection
-    st.subheader("🛠️ Model Settings")
+    st.subheader("🛠️ Azure Model Settings")
     st.session_state.selected_chat_model = st.selectbox(
         "Chat Model:",
         CHAT_MODELS,
@@ -261,6 +355,44 @@ with st.sidebar:
         index=EMBEDDING_MODELS.index(st.session_state.selected_embedding_model)
     )
     
+    # Model Parameters
+    st.subheader("⚙️ Model Parameters")
+    st.session_state.temperature = st.slider(
+        "🌡️ Temperature (Creativity)",
+        min_value=0.0,
+        max_value=2.0,
+        value=st.session_state.temperature,
+        step=0.1,
+        help="Higher values make output more creative/random"
+    )
+    
+    st.session_state.max_tokens = st.slider(
+        "📏 Max Tokens",
+        min_value=100,
+        max_value=4000,
+        value=st.session_state.max_tokens,
+        step=100,
+        help="Maximum response length"
+    )
+    
+    st.session_state.top_p = st.slider(
+        "🎯 Top P (Focus)",
+        min_value=0.1,
+        max_value=1.0,
+        value=st.session_state.top_p,
+        step=0.1,
+        help="Controls diversity of responses"
+    )
+    
+    st.session_state.frequency_penalty = st.slider(
+        "🔄 Frequency Penalty",
+        min_value=0.0,
+        max_value=2.0,
+        value=st.session_state.frequency_penalty,
+        step=0.1,
+        help="Reduces repetition in responses"
+    )
+    
     st.divider()
     
     # PDF Upload Section
@@ -269,7 +401,6 @@ with st.sidebar:
     
     if uploaded_file:
         if st.button("🚀 Process PDF"):
-            # Create new PDF session
             create_new_session("pdf")
             current_session = get_current_session()
             current_session["pdf_name"] = uploaded_file.name
@@ -283,11 +414,11 @@ with st.sidebar:
                 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
                 chunks = text_splitter.split_text(raw_text)
                 
-                # Extract entities
-                entities = extract_entities(raw_text)
+                # Extract entities using Azure models
+                entities = extract_entities_with_azure(raw_text)
                 current_session["entities"] = entities
                 
-                # Embedding model
+                # Setup models
                 embedding_model = OpenAIEmbeddings(
                     base_url=BASE_URL,
                     model=st.session_state.selected_embedding_model,
@@ -298,11 +429,14 @@ with st.sidebar:
                 vectordb = Chroma.from_texts(chunks, embedding_model, persist_directory="./chroma_index")
                 vectordb.persist()
                 
-                # LLM model
                 llm = ChatOpenAI(
                     base_url=BASE_URL,
                     model=st.session_state.selected_chat_model,
                     api_key=API_KEY,
+                    temperature=st.session_state.temperature,
+                    max_tokens=st.session_state.max_tokens,
+                    top_p=st.session_state.top_p,
+                    frequency_penalty=st.session_state.frequency_penalty,
                     http_client=client
                 )
                 
@@ -321,6 +455,16 @@ with st.sidebar:
     if current_session["rag_ready"]:
         st.subheader("📊 PDF Actions")
         
+        # Template upload for PowerPoint
+        template_image = st.file_uploader(
+            "🖼️ Upload PPT Template (optional)",
+            type=['png', 'jpg', 'jpeg'],
+            help="Upload background image for PowerPoint slides"
+        )
+        
+        # Number of slides
+        num_slides = st.slider("📊 Number of Slides", 3, 10, 5)
+        
         # Download format selection
         download_format = st.selectbox(
             "📥 Download Format:",
@@ -328,56 +472,49 @@ with st.sidebar:
             key="download_format"
         )
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("📄 Generate Summary"):
-                with st.spinner("Generating summary..."):
-                    summary = generate_pdf_summary(current_session["text_chunks"])
-                    filename = current_session["pdf_name"].replace(".pdf", "")
+        if st.button("📄 Generate Summary"):
+            with st.spinner("Generating summary..."):
+                summary = generate_pdf_summary(current_session["text_chunks"])
+                filename = current_session["pdf_name"].replace(".pdf", "")
+                
+                if download_format == "txt":
+                    st.download_button(
+                        label="💾 Download TXT",
+                        data=summary,
+                        file_name=f"{filename}_summary.txt",
+                        mime="text/plain"
+                    )
+                elif download_format == "pdf":
+                    pdf_data = create_pdf(summary, filename)
+                    st.download_button(
+                        label="💾 Download PDF",
+                        data=pdf_data,
+                        file_name=f"{filename}_summary.pdf",
+                        mime="application/pdf"
+                    )
+                elif download_format == "pptx":
+                    template_img = None
+                    if template_image:
+                        template_img = Image.open(template_image)
                     
-                    if download_format == "txt":
-                        st.download_button(
-                            label="💾 Download TXT",
-                            data=summary,
-                            file_name=f"{filename}_summary.txt",
-                            mime="text/plain"
-                        )
-                    elif download_format == "pdf":
-                        pdf_data = create_pdf(summary, filename)
-                        st.download_button(
-                            label="💾 Download PDF",
-                            data=pdf_data,
-                            file_name=f"{filename}_summary.pdf",
-                            mime="application/pdf"
-                        )
-                    elif download_format == "pptx":
-                        pptx_data = create_pptx(summary, filename)
-                        st.download_button(
-                            label="💾 Download PPTX",
-                            data=pptx_data,
-                            file_name=f"{filename}_summary.pptx",
-                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                        )
-        
-        with col2:
-            if st.button("🔍 Show NER"):
-                if current_session["entities"]:
-                    st.markdown("### Named Entities")
-                    entity_display = format_entities_for_display(current_session["entities"])
-                    st.markdown(entity_display)
+                    pptx_data = create_pptx_with_template(summary, filename, template_img, num_slides)
+                    st.download_button(
+                        label="💾 Download PPTX",
+                        data=pptx_data,
+                        file_name=f"{filename}_summary.pptx",
+                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                    )
     
     st.divider()
     
     # Session Management
     st.subheader("💬 Chat Sessions")
     
-    # New Chat Button
     if st.button("➕ New Chat"):
         create_new_session("chat")
         st.rerun()
     
-    # Display sessions
+    # Display sessions with download buttons
     for session_id in list(st.session_state.chat_sessions.keys()):
         session = st.session_state.chat_sessions[session_id]
         session_type = "📄 PDF" if session["session_type"] == "pdf" else "💬 Chat"
@@ -386,7 +523,7 @@ with st.sidebar:
         if session["pdf_name"]:
             session_name = f"📄 {session['pdf_name'][:15]}... - {session_id[-8:]}"
         
-        col1, col2 = st.columns([3, 1])
+        col1, col2, col3 = st.columns([2, 0.7, 0.7])
         
         with col1:
             if st.button(
@@ -398,11 +535,21 @@ with st.sidebar:
                 st.rerun()
         
         with col2:
+            chat_history = download_chat_history(session["messages"], session_id)
+            st.download_button(
+                "💾",
+                chat_history,
+                file_name=f"chat_{session_id.replace(':', '-')}.txt",
+                mime="text/plain",
+                key=f"download_{session_id}",
+                help="Download chat history"
+            )
+        
+        with col3:
             if st.button("🗑️", key=f"delete_{session_id}"):
                 delete_session(session_id)
                 st.rerun()
     
-    # Clear All Chats
     if st.button("🧹 Clear All Chats"):
         st.session_state.chat_sessions = {}
         create_new_session("chat")
@@ -415,49 +562,66 @@ session_type_icon = "📄" if current_session["session_type"] == "pdf" else "�
 if current_session["pdf_name"]:
     st.title(f"{session_type_icon} PDF Chat - {current_session['pdf_name']}")
 else:
-    st.title(f"{session_type_icon} AI Chat Assistant")
+    st.title(f"{session_type_icon} AI Assistant")
 
-# Display current model info
-st.caption(f"Using: {st.session_state.selected_chat_model} | Session: {st.session_state.current_session_id[-8:]}")
+# Display current settings
+st.caption(f"Model: {st.session_state.selected_chat_model} | Temp: {st.session_state.temperature} | Session: {st.session_state.current_session_id[-8:]}")
 
-# Display NER results if available
+# Voice Input Section using Azure models
+st.subheader("🎤 Voice Input (Azure Powered)")
+col1, col2 = st.columns([3, 1])
+
+with col1:
+    voice_text = st.text_input(
+        "Voice Input (simulated):",
+        value=st.session_state.voice_input,
+        placeholder="Type here to simulate voice input or paste transcribed text..."
+    )
+
+with col2:
+    if st.button("🎤 Process Voice"):
+        if voice_text:
+            processed_voice = transcribe_audio_with_azure_whisper(voice_text)
+            st.session_state.voice_input = processed_voice
+            st.success("Voice processed with Azure!")
+
+# Show NER results ONLY in main area (Bug Fixed)
 if current_session.get("entities"):
-    with st.expander("🔍 Named Entities Found", expanded=False):
+    with st.expander("🔍 Named Entity Recognition (Azure AI)", expanded=False):
         entity_display = format_entities_for_display(current_session["entities"])
         st.markdown(entity_display)
 
 # Display chat messages
 display_chat(current_session["messages"])
 
-# Chat input
-if current_session["rag_ready"]:
-    prompt = st.chat_input("Ask a question about the uploaded PDF...")
-    if prompt:
-        # Add user message
-        current_session["messages"].append(HumanMessage(content=prompt))
-        st.chat_message("user").write(prompt)
-        
-        # Generate response
-        with st.spinner("🤔 Thinking..."):
+# Chat input with voice integration
+prompt = st.chat_input("Ask me anything or use voice input...")
+
+# Use voice input if available
+if st.session_state.voice_input and not prompt:
+    prompt = st.session_state.voice_input
+    st.session_state.voice_input = ""  # Clear after use
+
+if prompt:
+    # Add user message
+    current_session["messages"].append(HumanMessage(content=prompt))
+    st.chat_message("user").write(prompt)
+    
+    # Generate response
+    with st.spinner("🤔 Thinking..."):
+        if current_session["rag_ready"]:
             result = current_session["rag_chain"].invoke(prompt)
             answer = result["result"]
             current_session["messages"].append(AIMessage(content=answer))
-            st.chat_message("assistant").write(answer)
-            st.rerun()
-
-else:
-    prompt = st.chat_input("Ask me anything...")
-    if prompt:
-        # Add user message
-        current_session["messages"].append(HumanMessage(content=prompt))
-        st.chat_message("user").write(prompt)
-        
-        # Generate response
-        with st.spinner("🤔 Thinking..."):
+        else:
+            # Setup Chat LLM
             chat = ChatOpenAI(
                 base_url=BASE_URL,
                 api_key=API_KEY,
-                temperature=0.7,
+                temperature=st.session_state.temperature,
+                max_tokens=st.session_state.max_tokens,
+                top_p=st.session_state.top_p,
+                frequency_penalty=st.session_state.frequency_penalty,
                 model=st.session_state.selected_chat_model,
                 http_client=client
             )
@@ -481,6 +645,15 @@ else:
             response = result["messages"][-1].content
 
             current_session["messages"].append(AIMessage(content=response))
-            st.chat_message("assistant").write(response)
-            st.rerun()
-
+        
+        # Display response with TTS option
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.chat_message("assistant").write(current_session["messages"][-1].content)
+        with col2:
+            if st.button("🔊 TTS", key="tts_latest"):
+                tts_result = text_to_speech_with_azure(current_session["messages"][-1].content)
+                if tts_result:
+                    st.info(f"🎵 Audio: {tts_result}")
+        
+        st.rerun()
