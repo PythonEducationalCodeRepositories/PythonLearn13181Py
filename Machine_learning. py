@@ -66,7 +66,7 @@ st.set_page_config(page_title='RAG PDF Summarizer Chatbot', layout='wide')
 tiktoken_cache_dir = "./token"
 os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
 
-# Create httpx client with proper settings
+# Create httpx client
 @st.cache_resource
 def get_http_client():
     return httpx.Client(verify=False, timeout=30.0)
@@ -192,7 +192,7 @@ def create_pdf_summary(text: str, filename: str) -> bytes:
         st.error(f"Error creating PDF: {str(e)}")
         return None
 
-def create_chat_history_pdf(messages: List[Union[HumanMessage, AIMessage, SystemMessage]], session_id: str) -> bytes:
+def create_chat_history_pdf(messages, session_name):
     """Create PDF from chat history"""
     try:
         buffer = BytesIO()
@@ -201,7 +201,7 @@ def create_chat_history_pdf(messages: List[Union[HumanMessage, AIMessage, System
         styles = getSampleStyleSheet()
         
         # Title
-        title = Paragraph(f"Chat History - {session_id}", styles['Title'])
+        title = Paragraph(f"Chat History - {session_name}", styles['Title'])
         story.append(title)
         story.append(Spacer(1, 12))
         
@@ -275,39 +275,14 @@ def format_entities_for_display(entities: dict) -> str:
     
     return formatted
 
-# Initialize session state
-def initialize_session_state():
-    """Initialize all session state variables"""
-    # Core session management
-    if "chat_sessions" not in st.session_state:
-        st.session_state.chat_sessions = {}
-    
-    if "current_session_id" not in st.session_state:
-        session_id = str(uuid.uuid4())
-        st.session_state.current_session_id = session_id
-        st.session_state.chat_sessions[session_id] = create_default_session()
-    
-    # Model settings
-    if "selected_chat_model" not in st.session_state:
-        st.session_state.selected_chat_model = CHAT_MODELS[0]
-    
-    if "selected_embedding_model" not in st.session_state:
-        st.session_state.selected_embedding_model = EMBEDDING_MODELS[0]
-    
-    # UI state
-    if "show_ner" not in st.session_state:
-        st.session_state.show_ner = False
-    
-    if "document_processed" not in st.session_state:
-        st.session_state.document_processed = False
-
-def create_default_session():
-    """Create a default session structure"""
+# Session management functions
+def create_session_structure():
+    """Create standard session structure"""
     return {
         "messages": [SystemMessage(content=CHARACTER_PERSONAS["Default Assistant"])],
         "rag_chain": None,
         "rag_ready": False,
-        "document_name": None,
+        "file_name": None,  # Changed from document_name/pdf_name to file_name
         "session_type": "chat",
         "text_chunks": None,
         "entities": None,
@@ -315,24 +290,56 @@ def create_default_session():
         "vectordb_path": None
     }
 
+def initialize_session_state():
+    """Initialize all session state variables"""
+    if "chat_sessions" not in st.session_state:
+        st.session_state.chat_sessions = {}
+    
+    if "current_session_id" not in st.session_state:
+        session_id = str(uuid.uuid4())[:8]  # Short ID for display
+        st.session_state.current_session_id = session_id
+        st.session_state.chat_sessions[session_id] = create_session_structure()
+    
+    if "selected_chat_model" not in st.session_state:
+        st.session_state.selected_chat_model = CHAT_MODELS[0]
+    
+    if "selected_embedding_model" not in st.session_state:
+        st.session_state.selected_embedding_model = EMBEDDING_MODELS[0]
+    
+    # Initialize model parameters
+    if "max_tokens" not in st.session_state:
+        st.session_state.max_tokens = 1000
+    
+    if "temperature" not in st.session_state:
+        st.session_state.temperature = 0.7
+    
+    if "show_ner" not in st.session_state:
+        st.session_state.show_ner = False
+
 def get_current_session():
-    """Get the current active session"""
+    """Get current session with safety checks"""
+    if st.session_state.current_session_id not in st.session_state.chat_sessions:
+        # If current session doesn't exist, create it
+        st.session_state.chat_sessions[st.session_state.current_session_id] = create_session_structure()
+    
     return st.session_state.chat_sessions[st.session_state.current_session_id]
 
 def create_new_session(session_type="chat"):
     """Create a new session"""
-    session_id = str(uuid.uuid4())
-    st.session_state.chat_sessions[session_id] = create_default_session()
-    st.session_state.chat_sessions[session_id]["session_type"] = session_type
+    session_id = str(uuid.uuid4())[:8]
+    new_session = create_session_structure()
+    new_session["session_type"] = session_type
+    
+    st.session_state.chat_sessions[session_id] = new_session
     st.session_state.current_session_id = session_id
     st.session_state.show_ner = False
     return session_id
 
 def delete_session(session_id):
-    """Delete a session"""
-    if len(st.session_state.chat_sessions) > 1:
-        # Clean up vectordb if exists
-        session = st.session_state.chat_sessions.get(session_id, {})
+    """Delete a session with cleanup"""
+    if len(st.session_state.chat_sessions) > 1 and session_id in st.session_state.chat_sessions:
+        # Clean up vectordb
+        session = st.session_state.chat_sessions[session_id]
         if session.get("vectordb_path") and os.path.exists(session["vectordb_path"]):
             try:
                 shutil.rmtree(session["vectordb_path"])
@@ -340,12 +347,13 @@ def delete_session(session_id):
                 pass
         
         del st.session_state.chat_sessions[session_id]
+        
         if st.session_state.current_session_id == session_id:
             st.session_state.current_session_id = list(st.session_state.chat_sessions.keys())[0]
 
-# Helper to display chat messages
-def display_chat(messages: List[Union[HumanMessage, AIMessage, SystemMessage]]):
-    """Display chat messages in the interface"""
+# Helper functions
+def display_chat(messages):
+    """Display chat messages"""
     for msg in messages[1:]:  # Skip system message
         if isinstance(msg, HumanMessage):
             with st.chat_message("user"):
@@ -354,7 +362,6 @@ def display_chat(messages: List[Union[HumanMessage, AIMessage, SystemMessage]]):
             with st.chat_message("assistant"):
                 st.write(msg.content)
 
-# Generate document summary
 def generate_document_summary(text_chunks, character_persona):
     """Generate summary of document chunks"""
     try:
@@ -362,10 +369,12 @@ def generate_document_summary(text_chunks, character_persona):
             base_url=BASE_URL,
             api_key=API_KEY,
             model=st.session_state.selected_chat_model,
+            max_tokens=st.session_state.max_tokens,
+            temperature=st.session_state.temperature,
             http_client=client
         )
         
-        combined_text = "\n".join(text_chunks[:10])  # Limit for summary
+        combined_text = "\n".join(text_chunks[:10])
         summary_prompt = f"""
         {character_persona}
         
@@ -380,7 +389,6 @@ def generate_document_summary(text_chunks, character_persona):
         st.error(f"Error generating summary: {str(e)}")
         return None
 
-# Process document function
 def process_document(uploaded_file):
     """Process uploaded document and create RAG chain"""
     try:
@@ -410,7 +418,7 @@ def process_document(uploaded_file):
         # Extract entities
         entities = extract_entities(raw_text)
         
-        # Create unique vectordb path for this session
+        # Create unique vectordb path
         vectordb_path = f"./chroma_index_{st.session_state.current_session_id}"
         
         # Create embeddings
@@ -433,6 +441,8 @@ def process_document(uploaded_file):
         llm = ChatOpenAI(
             base_url=BASE_URL,
             model=st.session_state.selected_chat_model,
+            max_tokens=st.session_state.max_tokens,
+            temperature=st.session_state.temperature,
             api_key=API_KEY,
             http_client=client
         )
@@ -449,7 +459,7 @@ def process_document(uploaded_file):
         current_session.update({
             "rag_chain": rag_chain,
             "rag_ready": True,
-            "document_name": uploaded_file.name,
+            "file_name": uploaded_file.name,  # Use consistent key name
             "text_chunks": chunks,
             "entities": entities,
             "vectordb_path": vectordb_path,
@@ -466,27 +476,59 @@ def process_document(uploaded_file):
 initialize_session_state()
 
 # Main UI
-st.title("🤖 AI RAG Chat Assistant")
+st.title("AI RAG Chat Assistant")
 
 # Sidebar
 with st.sidebar:
-    st.header("⚙️ Settings")
+    # Add TEAM A BBSR Logo at the top
+    st.markdown("""
+        <div style='text-align: center; padding: 10px; margin-bottom: 20px; background-color: #f0f2f6; border-radius: 10px;'>
+            <h2 style='color: #1f77b4; margin: 0; font-weight: bold;'>🚀 TEAM A BBSR</h2>
+            <p style='color: #666; margin: 5px 0 0 0; font-size: 12px;'>AI Solutions & Innovation</p>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    st.header("Settings")
     
     # Model Selection
     st.subheader("Models")
     st.session_state.selected_chat_model = st.selectbox(
         "Chat Model:",
         CHAT_MODELS,
-        index=CHAT_MODELS.index(st.session_state.selected_chat_model),
-        key="chat_model_select"
+        index=CHAT_MODELS.index(st.session_state.selected_chat_model)
     )
     
     st.session_state.selected_embedding_model = st.selectbox(
         "Embedding Model:",
         EMBEDDING_MODELS,
-        index=EMBEDDING_MODELS.index(st.session_state.selected_embedding_model),
-        key="embedding_model_select"
+        index=EMBEDDING_MODELS.index(st.session_state.selected_embedding_model)
     )
+    
+    # Model Parameters - Add sliders for tokens and temperature
+    st.subheader("Model Parameters")
+    
+    # Max Tokens Slider
+    st.session_state.max_tokens = st.slider(
+        "Max Tokens:",
+        min_value=50,
+        max_value=4000,
+        value=st.session_state.max_tokens,
+        step=50,
+        help="Maximum number of tokens to generate"
+    )
+    
+    # Temperature Slider
+    st.session_state.temperature = st.slider(
+        "Temperature:",
+        min_value=0.0,
+        max_value=2.0,
+        value=st.session_state.temperature,
+        step=0.1,
+        help="Controls randomness: 0.0 = deterministic, 2.0 = very creative"
+    )
+    
+    # Display current values
+    st.caption(f"Current: {st.session_state.max_tokens} tokens, {st.session_state.temperature} temperature")
     
     # Character Selection
     st.subheader("Character")
@@ -494,8 +536,7 @@ with st.sidebar:
     selected_character = st.selectbox(
         "Select Character:",
         list(CHARACTER_PERSONAS.keys()),
-        index=list(CHARACTER_PERSONAS.keys()).index(current_session.get("character", "Default Assistant")),
-        key="character_select"
+        index=list(CHARACTER_PERSONAS.keys()).index(current_session["character"])
     )
     
     # Update character if changed
@@ -506,105 +547,99 @@ with st.sidebar:
     st.divider()
     
     # Document Upload
-    st.subheader("📄 Document Upload")
+    st.subheader("Document Upload")
     uploaded_file = st.file_uploader(
         "Upload Document", 
-        type=["pdf", "docx", "txt"],
-        key="file_uploader"
+        type=["pdf", "docx", "txt"]
     )
     
     if uploaded_file:
-        if st.button("🚀 Process Document", key="process_btn"):
+        if st.button("Process Document"):
             with st.spinner("Processing document..."):
                 # Create new document session
                 create_new_session("document")
                 
                 if process_document(uploaded_file):
-                    st.success("✅ Document processed successfully!")
-                    st.session_state.document_processed = True
+                    st.success("Document processed successfully!")
                 else:
-                    st.error("❌ Failed to process document")
+                    st.error("Failed to process document")
     
     # Document Actions
     current_session = get_current_session()
-    if current_session.get("rag_ready", False):
-        st.subheader("📊 Document Tools")
+    if current_session["rag_ready"]:
+        st.subheader("Document Tools")
         
         # Download format
-        download_format = st.selectbox(
-            "Format:",
-            ["txt", "pdf", "pptx"],
-            key="download_format_select"
-        )
+        download_format = st.selectbox("Format:", ["txt", "pdf", "pptx"])
         
         col1, col2 = st.columns(2)
         
         with col1:
-            if st.button("📋 Summary", key="summary_btn"):
+            if st.button("Summary"):
                 with st.spinner("Generating..."):
                     character_persona = CHARACTER_PERSONAS[current_session["character"]]
                     summary = generate_document_summary(current_session["text_chunks"], character_persona)
                     
                     if summary:
-                        filename = current_session["document_name"].rsplit('.', 1)[0]
+                        filename = current_session["file_name"]
+                        if filename and '.' in filename:
+                            filename = filename.rsplit('.', 1)[0]
                         
                         if download_format == "txt":
                             st.download_button(
-                                "💾 Download TXT",
+                                "Download TXT",
                                 data=summary,
                                 file_name=f"{filename}_summary.txt",
-                                mime="text/plain",
-                                key="download_txt"
+                                mime="text/plain"
                             )
                         elif download_format == "pdf":
                             pdf_data = create_pdf_summary(summary, filename)
                             if pdf_data:
                                 st.download_button(
-                                    "💾 Download PDF",
+                                    "Download PDF",
                                     data=pdf_data,
                                     file_name=f"{filename}_summary.pdf",
-                                    mime="application/pdf",
-                                    key="download_pdf"
+                                    mime="application/pdf"
                                 )
                         elif download_format == "pptx":
                             pptx_data = create_pptx(summary, filename)
                             if pptx_data:
                                 st.download_button(
-                                    "💾 Download PPTX",
+                                    "Download PPTX",
                                     data=pptx_data,
                                     file_name=f"{filename}_summary.pptx",
-                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                                    key="download_pptx"
+                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
                                 )
         
         with col2:
-            if st.button("🔍 NER", key="ner_btn"):
+            if st.button("NER"):
                 st.session_state.show_ner = not st.session_state.show_ner
     
     st.divider()
     
     # Session Management
-    st.subheader("💬 Sessions")
+    st.subheader("Sessions")
     
-    if st.button("➕ New Chat", key="new_chat_btn"):
+    if st.button("New Chat"):
         create_new_session("chat")
     
     # Display sessions
-    for idx, session_id in enumerate(list(st.session_state.chat_sessions.keys())):
+    for session_id in list(st.session_state.chat_sessions.keys()):
         session = st.session_state.chat_sessions[session_id]
         
         # Session display name
-        if session.get("document_name"):
-            display_name = f"📄 {session['document_name'][:20]}..."
+        file_name = session.get("file_name")
+        if file_name:
+            display_name = f"📄 {file_name[:20]}..."
         else:
-            display_name = f"💬 Chat {idx + 1}"
+            display_name = f"💬 Chat {session_id[:4]}"
         
         col1, col2, col3 = st.columns([3, 1, 1])
         
         with col1:
             if st.button(
                 display_name,
-                key=f"session_btn_{session_id}",
+                key=f"session_{session_id}",
                 type="primary" if session_id == st.session_state.current_session_id else "secondary"
             ):
                 st.session_state.current_session_id = session_id
@@ -613,23 +648,23 @@ with st.sidebar:
         with col2:
             # Download chat history
             if len(session["messages"]) > 1:
-                chat_pdf = create_chat_history_pdf(session["messages"], f"session_{idx+1}")
+                chat_pdf = create_chat_history_pdf(session["messages"], session_id[:4])
                 if chat_pdf:
                     st.download_button(
-                        "📥",
+                        "D",
                         data=chat_pdf,
-                        file_name=f"chat_history_{idx+1}.pdf",
+                        file_name=f"chat_{session_id[:4]}.pdf",
                         mime="application/pdf",
-                        key=f"download_chat_{session_id}",
-                        help="Download chat history"
+                        key=f"dl_{session_id}",
+                        help="Download chat"
                     )
         
         with col3:
-            if st.button("🗑️", key=f"delete_btn_{session_id}", help="Delete session"):
+            if st.button("X", key=f"del_{session_id}", help="Delete"):
                 delete_session(session_id)
     
-    if st.button("🧹 Clear All", key="clear_all_btn"):
-        # Clean up all vectordbs
+    if st.button("Clear All"):
+        # Clean up vectordbs
         for session in st.session_state.chat_sessions.values():
             if session.get("vectordb_path") and os.path.exists(session["vectordb_path"]):
                 try:
@@ -641,41 +676,38 @@ with st.sidebar:
         create_new_session("chat")
         st.session_state.show_ner = False
 
-# Main content area
+# Main content
 current_session = get_current_session()
 
 # Display session info
-if current_session.get("document_name"):
-    st.info(f"📄 Document Session: **{current_session['document_name']}** | Character: **{current_session['character']}**")
+file_name = current_session.get("file_name")
+if file_name:
+    st.info(f"Document Session: **{file_name}** | Character: **{current_session['character']}** | Tokens: **{st.session_state.max_tokens}** | Temp: **{st.session_state.temperature}**")
 else:
-    st.info(f"💬 Chat Session | Character: **{current_session['character']}**")
+    st.info(f"Chat Session | Character: **{current_session['character']}** | Tokens: **{st.session_state.max_tokens}** | Temp: **{st.session_state.temperature}**")
 
-# Display NER results if requested
+# Display NER results
 if st.session_state.show_ner and current_session.get("entities"):
-    with st.expander("🔍 Named Entity Recognition Results", expanded=True):
+    with st.expander("Named Entity Recognition Results", expanded=True):
         entity_display = format_entities_for_display(current_session["entities"])
         st.markdown(entity_display)
 
 # Display chat history
-if current_session["messages"]:
-    display_chat(current_session["messages"])
+display_chat(current_session["messages"])
 
 # Chat input
-if current_session.get("rag_ready", False):
+if current_session["rag_ready"]:
     # Document chat mode
     if prompt := st.chat_input("Ask about the document..."):
-        # Add user message
         current_session["messages"].append(HumanMessage(content=prompt))
         with st.chat_message("user"):
             st.write(prompt)
         
-        # Generate response
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 try:
-                    # Enhance prompt with character context
                     character_context = CHARACTER_PERSONAS[current_session["character"]]
-                    enhanced_prompt = f"{character_context}\n\nUser question about the document: {prompt}"
+                    enhanced_prompt = f"{character_context}\n\nUser question: {prompt}"
                     
                     result = current_session["rag_chain"].invoke({"query": enhanced_prompt})
                     answer = result["result"]
@@ -690,19 +722,18 @@ if current_session.get("rag_ready", False):
 else:
     # Regular chat mode
     if prompt := st.chat_input("Ask me anything..."):
-        # Add user message
         current_session["messages"].append(HumanMessage(content=prompt))
         with st.chat_message("user"):
             st.write(prompt)
         
-        # Generate response
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 try:
                     chat = ChatOpenAI(
                         base_url=BASE_URL,
                         api_key=API_KEY,
-                        temperature=0.7,
+                        temperature=st.session_state.temperature,
+                        max_tokens=st.session_state.max_tokens,
                         model=st.session_state.selected_chat_model,
                         http_client=client
                     )
@@ -711,7 +742,6 @@ else:
                         messages: List[Union[HumanMessage, AIMessage, SystemMessage]]
 
                     def chat_node(state: AgentState) -> AgentState:
-                        # Use character persona
                         character_context = CHARACTER_PERSONAS[current_session["character"]]
                         enhanced_messages = state["messages"].copy()
                         enhanced_messages[0] = SystemMessage(content=character_context)
