@@ -14,7 +14,10 @@ import streamlit as st
 from datetime import datetime
 import json
 from io import BytesIO
-import base64
+from pptx import Presentation
+from pptx.util import Pt
+from fpdf import FPDF
+import spacy
 
 # Configuration Variables
 API_KEY = "your-api-key-here"
@@ -46,6 +49,127 @@ tiktoken_cache_dir = "./token"
 os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
 client = httpx.Client(verify=False)
 
+# Load NER model
+@st.cache_resource
+def load_ner_model():
+    try:
+        return spacy.load("en_core_web_sm")
+    except IOError:
+        st.error("Please install spaCy English model: python -m spacy download en_core_web_sm")
+        return None
+
+nlp = load_ner_model()
+
+# File generation functions
+def create_pptx(summary_text: str, filename: str) -> bytes:
+    """Create PowerPoint file from text"""
+    prs = Presentation()
+    
+    # Title slide
+    title_slide_layout = prs.slide_layouts[0]
+    slide = prs.slides.add_slide(title_slide_layout)
+    title = slide.shapes.title
+    subtitle = slide.placeholders[1]
+    title.text = f"Summary: {filename}"
+    subtitle.text = "Generated Summary"
+    
+    # Content slide
+    bullet_slide_layout = prs.slide_layouts[1]
+    slide = prs.slides.add_slide(bullet_slide_layout)
+    shapes = slide.shapes
+    title_shape = shapes.title
+    body_shape = shapes.placeholders[1]
+    
+    title_shape.text = "Key Points"
+    tf = body_shape.text_frame
+    tf.clear()
+    
+    # Add bullet points
+    lines = [line.strip() for line in summary_text.split('\n') if line.strip()]
+    for i, line in enumerate(lines[:10]):  # Limit to 10 points
+        if i == 0:
+            tf.text = line
+        else:
+            p = tf.add_paragraph()
+            p.text = line
+            p.level = 0
+            p.font.size = Pt(14)
+    
+    # Save to bytes
+    pptx_io = BytesIO()
+    prs.save(pptx_io)
+    pptx_io.seek(0)
+    return pptx_io.read()
+
+def create_pdf(text: str, filename: str) -> bytes:
+    """Create PDF file from text"""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # Title
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(0, 10, f'Summary: {filename}', ln=True, align='C')
+    pdf.ln(10)
+    
+    # Content
+    pdf.set_font("Arial", size=12)
+    for line in text.split('\n'):
+        if line.strip():
+            pdf.multi_cell(0, 8, line.strip())
+            pdf.ln(2)
+    
+    pdf_output = BytesIO()
+    pdf.output(pdf_output)
+    pdf_output.seek(0)
+    return pdf_output.read()
+
+def extract_entities(text: str) -> dict:
+    """Extract named entities using spaCy NER"""
+    if not nlp:
+        return {}
+    
+    doc = nlp(text)
+    entities = {}
+    
+    for ent in doc.ents:
+        if ent.label_ not in entities:
+            entities[ent.label_] = []
+        if ent.text not in entities[ent.label_]:
+            entities[ent.label_].append(ent.text)
+    
+    return entities
+
+def format_entities_for_display(entities: dict) -> str:
+    """Format entities for nice display"""
+    if not entities:
+        return "No entities found."
+    
+    formatted = "## Named Entities Found:\n\n"
+    
+    entity_labels = {
+        'PERSON': '👤 People',
+        'ORG': '🏢 Organizations', 
+        'GPE': '🌍 Places',
+        'MONEY': '💰 Money',
+        'DATE': '📅 Dates',
+        'TIME': '⏰ Times',
+        'PRODUCT': '📦 Products',
+        'EVENT': '🎉 Events',
+        'WORK_OF_ART': '🎨 Works of Art',
+        'LAW': '⚖️ Laws',
+        'LANGUAGE': '🗣️ Languages'
+    }
+    
+    for label, items in entities.items():
+        display_label = entity_labels.get(label, f'📋 {label}')
+        formatted += f"**{display_label}:**\n"
+        for item in items[:5]:  # Limit to 5 per category
+            formatted += f"- {item}\n"
+        formatted += "\n"
+    
+    return formatted
+
 # Initialize session state
 def initialize_session_state():
     if "chat_sessions" not in st.session_state:
@@ -59,7 +183,9 @@ def initialize_session_state():
             "rag_chain": None,
             "rag_ready": False,
             "pdf_name": None,
-            "session_type": "chat"  # "chat" or "pdf"
+            "session_type": "chat",
+            "text_chunks": None,
+            "entities": None
         }
     
     if "selected_chat_model" not in st.session_state:
@@ -78,7 +204,9 @@ def create_new_session(session_type="chat"):
         "rag_chain": None,
         "rag_ready": False,
         "pdf_name": None,
-        "session_type": session_type
+        "session_type": session_type,
+        "text_chunks": None,
+        "entities": None
     }
     st.session_state.current_session_id = session_id
     return session_id
@@ -110,34 +238,6 @@ def generate_pdf_summary(text_chunks):
     summary_prompt = f"Please provide a comprehensive summary of the following PDF content:\n\n{combined_text}"
     
     response = chat.invoke([HumanMessage(content=summary_prompt)])
-    return response.content
-
-# Generate PowerPoint content
-def generate_ppt_content(summary):
-    ppt_prompt = f"""Convert the following summary into PowerPoint slide content format. 
-    Create 5-7 slides with titles and bullet points:
-    
-    {summary}
-    
-    Format as:
-    Slide 1: Title
-    - Point 1
-    - Point 2
-    
-    Slide 2: Title
-    - Point 1
-    - Point 2
-    
-    And so on..."""
-    
-    chat = ChatOpenAI(
-        base_url=BASE_URL,
-        api_key=API_KEY,
-        model=st.session_state.selected_chat_model,
-        http_client=client
-    )
-    
-    response = chat.invoke([HumanMessage(content=ppt_prompt)])
     return response.content
 
 # Initialize
@@ -183,6 +283,10 @@ with st.sidebar:
                 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
                 chunks = text_splitter.split_text(raw_text)
                 
+                # Extract entities
+                entities = extract_entities(raw_text)
+                current_session["entities"] = entities
+                
                 # Embedding model
                 embedding_model = OpenAIEmbeddings(
                     base_url=BASE_URL,
@@ -217,30 +321,51 @@ with st.sidebar:
     if current_session["rag_ready"]:
         st.subheader("📊 PDF Actions")
         
+        # Download format selection
+        download_format = st.selectbox(
+            "📥 Download Format:",
+            ["txt", "pdf", "pptx"],
+            key="download_format"
+        )
+        
         col1, col2 = st.columns(2)
         
         with col1:
             if st.button("📄 Generate Summary"):
                 with st.spinner("Generating summary..."):
                     summary = generate_pdf_summary(current_session["text_chunks"])
-                    st.download_button(
-                        label="💾 Download Summary",
-                        data=summary,
-                        file_name=f"{current_session['pdf_name']}_summary.txt",
-                        mime="text/plain"
-                    )
+                    filename = current_session["pdf_name"].replace(".pdf", "")
+                    
+                    if download_format == "txt":
+                        st.download_button(
+                            label="💾 Download TXT",
+                            data=summary,
+                            file_name=f"{filename}_summary.txt",
+                            mime="text/plain"
+                        )
+                    elif download_format == "pdf":
+                        pdf_data = create_pdf(summary, filename)
+                        st.download_button(
+                            label="💾 Download PDF",
+                            data=pdf_data,
+                            file_name=f"{filename}_summary.pdf",
+                            mime="application/pdf"
+                        )
+                    elif download_format == "pptx":
+                        pptx_data = create_pptx(summary, filename)
+                        st.download_button(
+                            label="💾 Download PPTX",
+                            data=pptx_data,
+                            file_name=f"{filename}_summary.pptx",
+                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        )
         
         with col2:
-            if st.button("🎯 Generate PPT Content"):
-                with st.spinner("Generating PPT content..."):
-                    summary = generate_pdf_summary(current_session["text_chunks"])
-                    ppt_content = generate_ppt_content(summary)
-                    st.download_button(
-                        label="💾 Download PPT Content",
-                        data=ppt_content,
-                        file_name=f"{current_session['pdf_name']}_ppt.txt",
-                        mime="text/plain"
-                    )
+            if st.button("🔍 Show NER"):
+                if current_session["entities"]:
+                    st.markdown("### Named Entities")
+                    entity_display = format_entities_for_display(current_session["entities"])
+                    st.markdown(entity_display)
     
     st.divider()
     
@@ -294,6 +419,12 @@ else:
 
 # Display current model info
 st.caption(f"Using: {st.session_state.selected_chat_model} | Session: {st.session_state.current_session_id[-8:]}")
+
+# Display NER results if available
+if current_session.get("entities"):
+    with st.expander("🔍 Named Entities Found", expanded=False):
+        entity_display = format_entities_for_display(current_session["entities"])
+        st.markdown(entity_display)
 
 # Display chat messages
 display_chat(current_session["messages"])
