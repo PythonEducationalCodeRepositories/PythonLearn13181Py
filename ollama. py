@@ -483,3 +483,4 @@ else:
             current_session["messages"].append(AIMessage(content=response))
             st.chat_message("assistant").write(response)
             st.rerun()
+
