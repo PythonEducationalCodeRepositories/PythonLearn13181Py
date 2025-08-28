@@ -1,35 +1,28 @@
-import streamlit as st
 from typing import TypedDict, List, Union
-import tempfile
-import os
-import httpx
-import tiktoken
-
-# LangChain imports
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain.chains.retrieval_qa.base import RetrievalQA
-
-# PDF processing
 from pdfplumber.high_level import extract_text
+import tempfile
+import os
+import httpx
+import tiktoken
+import streamlit as st
 
 # Configuration Variables
-API_KEY = "your_api_key_here"
-BASE_URL = "your_base_url_here"
-CHAT_MODEL = "your_chat_model_here"
-EMBEDDING_MODEL = "your_embedding_model_here"
+API_KEY = "your-api-key-here"
+BASE_URL = "https://your-base-url-here"
+CHAT_MODEL = "your-chat-model-name"
+EMBEDDING_MODEL = "your-embedding-model-name"
 
-# Streamlit page configuration
+# Configure
 st.set_page_config(page_title='RAG PDF Summarizer Chatbot', layout='wide')
 
-# Tiktoken configuration
 tiktoken_cache_dir = "./token"
 os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
-
-# HTTP client
 client = httpx.Client(verify=False)
 
 # Initialize session state
@@ -50,7 +43,7 @@ if "rag_ready" not in st.session_state:
 if "expecting_pdf" not in st.session_state:
     st.session_state.expecting_pdf = False
 
-# Helper function to display chat messages
+# Helper to display chat messages
 def display_chat(messages: List[Union[HumanMessage, AIMessage, SystemMessage]]):
     st.markdown("### Chat History")
     # Show oldest first (top to bottom)
@@ -98,14 +91,8 @@ if st.session_state.expecting_pdf and not st.session_state.rag_ready:
             temp_pdf_path = tmp.name
         
         with st.spinner("Extracting and processing PDF..."):
-            # Extract text from PDF
             raw_text = extract_text(temp_pdf_path)
-            
-            # Split text into chunks
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000, 
-                chunk_overlap=200
-            )
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
             chunks = text_splitter.split_text(raw_text)
             
             # Embedding model
@@ -116,12 +103,7 @@ if st.session_state.expecting_pdf and not st.session_state.rag_ready:
                 http_client=client
             )
             
-            # Create vector database
-            vectordb = Chroma.from_texts(
-                chunks, 
-                embedding_model, 
-                persist_directory="./chroma_index"
-            )
+            vectordb = Chroma.from_texts(chunks, embedding_model, persist_directory="./chroma_index")
             vectordb.persist()
             
             # LLM model
@@ -132,13 +114,8 @@ if st.session_state.expecting_pdf and not st.session_state.rag_ready:
                 http_client=client
             )
             
-            # Create RAG chain
             retriever = vectordb.as_retriever()
-            rag_chain = RetrievalQA.from_chain_type(
-                llm=llm, 
-                retriever=retriever, 
-                return_source_documents=True
-            )
+            rag_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
             
             st.session_state.rag_chain = rag_chain
             st.session_state.rag_ready = True
@@ -160,7 +137,6 @@ if st.session_state.rag_ready:
         with st.spinner("🔍 Querying RAG model..."):
             result = st.session_state.rag_chain.invoke(prompt)
             answer = result["result"]
-            
             st.session_state.messages.append(AIMessage(content=answer))
             st.rerun()
 
@@ -183,31 +159,26 @@ else:
                 model=CHAT_MODEL,
                 http_client=client
             )
-            
-            # Agent State class
+
             class AgentState(TypedDict):
                 messages: List[Union[HumanMessage, AIMessage, SystemMessage]]
-            
-            # First node function
+
             def first_node(state: AgentState) -> AgentState:
                 response = chat.invoke(state["messages"])
                 state["messages"].append(AIMessage(content=response.content))
                 return state
-            
-            # Create and compile graph
+
             graph = StateGraph(AgentState)
             graph.add_node("node1", first_node)
             graph.add_edge(START, "node1")
             graph.add_edge("node1", END)
-            
             agent = graph.compile()
-            
-            # Convert all messages in session state to LangChain message objects
+
+            # Convert all messages in session state to LangChain message objects (they already are)
             state_input = {"messages": st.session_state.messages.copy()}
-            
             result = agent.invoke(state_input)
             response = result["messages"][-1].content
-            
+
             # Append AI response to messages
             st.session_state.messages.append(AIMessage(content=response))
             st.rerun()
