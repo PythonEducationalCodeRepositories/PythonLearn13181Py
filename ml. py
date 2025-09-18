@@ -1,0 +1,411 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression, Lasso, Ridge
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.ensemble import RandomForestRegressor, AdaBoostRegressor, GradientBoostingRegressor
+from sklearn.svm import SVR
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, explained_variance_score
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set page config
+st.set_page_config(
+    page_title="Restaurant Revenue Prediction",
+    page_icon="ðŸ½ï¸",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 3rem;
+        color: #FF6B35;
+        text-align: center;
+        margin-bottom: 2rem;
+        font-weight: bold;
+    }
+    .sub-header {
+        font-size: 1.5rem;
+        color: #2E86AB;
+        margin-top: 2rem;
+        margin-bottom: 1rem;
+    }
+    .metric-card {
+        background-color: #F8F9FA;
+        padding: 1rem;
+        border-radius: 10px;
+        border-left: 5px solid #FF6B35;
+        margin: 0.5rem 0;
+    }
+    .sidebar .sidebar-content {
+        background-color: #F0F2F6;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Title
+st.markdown('<h1 class="main-header">ðŸ½ï¸ Restaurant Revenue Prediction ML Dashboard</h1>', unsafe_allow_html=True)
+
+@st.cache_data
+def load_data():
+    """Load and return the dataset"""
+    try:
+        df = pd.read_csv('Restaurant_revenue.csv')
+        return df
+    except FileNotFoundError:
+        st.error("âŒ Restaurant_revenue.csv not found in current directory!")
+        return None
+
+def perform_eda(df):
+    """Perform Exploratory Data Analysis"""
+    st.markdown('<h2 class="sub-header">ðŸ“Š Exploratory Data Analysis</h2>', unsafe_allow_html=True)
+
+    # Dataset Overview
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Records", len(df))
+    with col2:
+        st.metric("Features", len(df.columns))
+    with col3:
+        st.metric("Numeric Features", len(df.select_dtypes(include=[np.number]).columns))
+    with col4:
+        st.metric("Categorical Features", len(df.select_dtypes(include=['object']).columns))
+
+    # Dataset Preview
+    st.subheader("ðŸ“‹ Dataset Preview")
+    st.dataframe(df.head(10))
+
+    # Dataset Info
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("ðŸ“ˆ Dataset Statistics")
+        st.dataframe(df.describe())
+
+    with col2:
+        st.subheader("ðŸ” Data Types & Missing Values")
+        info_df = pd.DataFrame({
+            'Data Type': df.dtypes,
+            'Missing Values': df.isnull().sum(),
+            'Missing %': (df.isnull().sum() / len(df) * 100).round(2)
+        })
+        st.dataframe(info_df)
+
+    # Visualizations
+    st.subheader("ðŸ“Š Data Visualizations")
+
+    # Revenue Distribution
+    fig1 = px.histogram(df, x='Monthly_Revenue', nbins=30, 
+                       title='Distribution of Monthly Revenue',
+                       color_discrete_sequence=['#FF6B35'])
+    fig1.update_layout(showlegend=False)
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # Correlation Heatmap
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    correlation_matrix = df[numeric_cols].corr()
+
+    fig2 = px.imshow(correlation_matrix, 
+                     text_auto=True, 
+                     aspect="auto",
+                     title="Correlation Heatmap",
+                     color_continuous_scale='RdBu_r')
+    st.plotly_chart(fig2, use_container_width=True)
+
+    # Feature distributions
+    col1, col2 = st.columns(2)
+
+    with col1:
+        fig3 = px.box(df, y='Monthly_Revenue', x='Cuisine_Type',
+                      title='Revenue by Cuisine Type',
+                      color='Cuisine_Type')
+        st.plotly_chart(fig3, use_container_width=True)
+
+    with col2:
+        fig4 = px.scatter(df, x='Number_of_Customers', y='Monthly_Revenue',
+                          color='Cuisine_Type', size='Average_Customer_Spending',
+                          title='Customers vs Revenue')
+        st.plotly_chart(fig4, use_container_width=True)
+
+def preprocess_data(df, target_column):
+    """Preprocess the data for ML models"""
+    # Separate features and target
+    X = df.drop(columns=[target_column])
+    y = df[target_column]
+
+    # Handle categorical variables
+    le_dict = {}
+    for column in X.select_dtypes(include=['object']).columns:
+        le = LabelEncoder()
+        X[column] = le.fit_transform(X[column])
+        le_dict[column] = le
+
+    return X, y, le_dict
+
+def train_models(X_train, X_test, y_train, y_test):
+    """Train multiple ML models and return results"""
+
+    # Define models
+    models = {
+        'Linear Regression': LinearRegression(),
+        'Ridge Regression': Ridge(alpha=1.0),
+        'Lasso Regression': Lasso(alpha=1.0),
+        'Decision Tree': DecisionTreeRegressor(random_state=42),
+        'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42),
+        'AdaBoost': AdaBoostRegressor(random_state=42),
+        'Gradient Boosting': GradientBoostingRegressor(random_state=42),
+        'K-Neighbors': KNeighborsRegressor(n_neighbors=5),
+        'SVR': SVR(kernel='rbf')
+    }
+
+    results = {}
+    predictions = {}
+
+    for name, model in models.items():
+        # Train model
+        model.fit(X_train, y_train)
+
+        # Make predictions
+        y_pred = model.predict(X_test)
+        predictions[name] = y_pred
+
+        # Calculate metrics
+        mae = mean_absolute_error(y_test, y_pred)
+        mse = mean_squared_error(y_test, y_pred)
+        rmse = np.sqrt(mse)
+        r2 = r2_score(y_test, y_pred)
+        evs = explained_variance_score(y_test, y_pred)
+
+        results[name] = {
+            'Model': model,
+            'MAE': mae,
+            'MSE': mse,
+            'RMSE': rmse,
+            'RÂ² Score': r2,
+            'Explained Variance': evs,
+            'Accuracy (RÂ²)': r2 * 100
+        }
+
+    return results, predictions
+
+def display_results(results, y_test, predictions):
+    """Display model comparison results"""
+
+    # Create results dataframe
+    results_df = pd.DataFrame({
+        name: {
+            'MAE': metrics['MAE'],
+            'MSE': metrics['MSE'], 
+            'RMSE': metrics['RMSE'],
+            'RÂ² Score': metrics['RÂ² Score'],
+            'Explained Variance': metrics['Explained Variance'],
+            'Accuracy (%)': metrics['Accuracy (RÂ²)']
+        }
+        for name, metrics in results.items()
+    }).T
+
+    # Sort by RÂ² Score (descending)
+    results_df = results_df.sort_values('RÂ² Score', ascending=False)
+
+    st.subheader("ðŸ† Model Performance Comparison")
+    st.dataframe(results_df.round(4))
+
+    # Best model
+    best_model_name = results_df.index[0]
+    best_r2 = results_df.loc[best_model_name, 'RÂ² Score']
+
+    st.success(f"ðŸŽ¯ Best Performing Model: **{best_model_name}** with RÂ² Score: **{best_r2:.4f}**")
+
+    # Visualization of results
+    col1, col2 = st.columns(2)
+
+    with col1:
+        fig_r2 = px.bar(x=results_df.index, y=results_df['RÂ² Score'],
+                        title='RÂ² Score Comparison',
+                        color=results_df['RÂ² Score'],
+                        color_continuous_scale='viridis')
+        fig_r2.update_xaxis(tickangle=45)
+        st.plotly_chart(fig_r2, use_container_width=True)
+
+    with col2:
+        fig_rmse = px.bar(x=results_df.index, y=results_df['RMSE'],
+                          title='RMSE Comparison',
+                          color=results_df['RMSE'],
+                          color_continuous_scale='viridis_r')
+        fig_rmse.update_xaxis(tickangle=45)
+        st.plotly_chart(fig_rmse, use_container_width=True)
+
+    # Prediction vs Actual for best model
+    best_predictions = predictions[best_model_name]
+
+    fig_pred = px.scatter(x=y_test, y=best_predictions,
+                          title=f'Actual vs Predicted - {best_model_name}',
+                          labels={'x': 'Actual Revenue', 'y': 'Predicted Revenue'})
+    fig_pred.add_shape(type="line", x0=y_test.min(), y0=y_test.min(), 
+                       x1=y_test.max(), y1=y_test.max(),
+                       line=dict(dash="dash", color="red"))
+    st.plotly_chart(fig_pred, use_container_width=True)
+
+    return best_model_name, results[best_model_name]['Model']
+
+def prediction_interface(best_model, X_columns, le_dict, df):
+    """Create prediction interface"""
+    st.markdown('<h2 class="sub-header">ðŸ”® Make Predictions</h2>', unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Numeric inputs
+        num_customers = st.number_input("Number of Customers", 
+                                       min_value=1, max_value=200, value=50)
+        menu_price = st.number_input("Menu Price ($)", 
+                                    min_value=5.0, max_value=100.0, value=25.0)
+        marketing_spend = st.number_input("Marketing Spend ($)", 
+                                        min_value=0.0, max_value=50.0, value=5.0)
+        avg_customer_spending = st.number_input("Average Customer Spending ($)", 
+                                              min_value=5.0, max_value=100.0, value=30.0)
+
+    with col2:
+        # Categorical and other inputs
+        cuisine_options = df['Cuisine_Type'].unique()
+        cuisine_type = st.selectbox("Cuisine Type", cuisine_options)
+
+        promotions = st.selectbox("Promotions", [0, 1], format_func=lambda x: "Yes" if x else "No")
+        reviews = st.number_input("Number of Reviews", min_value=0, max_value=200, value=50)
+
+    if st.button("ðŸŽ¯ Predict Revenue", type="primary"):
+        # Prepare input data
+        input_data = pd.DataFrame({
+            'Number_of_Customers': [num_customers],
+            'Menu_Price': [menu_price],
+            'Marketing_Spend': [marketing_spend],
+            'Cuisine_Type': [cuisine_type],
+            'Average_Customer_Spending': [avg_customer_spending],
+            'Promotions': [promotions],
+            'Reviews': [reviews]
+        })
+
+        # Encode categorical variables
+        for column, encoder in le_dict.items():
+            if column in input_data.columns:
+                input_data[column] = encoder.transform(input_data[column])
+
+        # Make sure columns are in the same order as training data
+        input_data = input_data[X_columns]
+
+        # Predict
+        prediction = best_model.predict(input_data)[0]
+
+        # Display prediction
+        st.balloons()
+        st.success(f"ðŸ’° Predicted Monthly Revenue: **${prediction:,.2f}**")
+
+        # Additional insights
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Revenue per Customer", f"${prediction/num_customers:.2f}")
+        with col2:
+            roi = ((prediction - marketing_spend) / marketing_spend * 100) if marketing_spend > 0 else 0
+            st.metric("Marketing ROI", f"{roi:.1f}%")
+        with col3:
+            profit_margin = ((prediction - (num_customers * menu_price * 0.3)) / prediction * 100) if prediction > 0 else 0
+            st.metric("Est. Profit Margin", f"{profit_margin:.1f}%")
+
+def main():
+    """Main application function"""
+
+    # Sidebar
+    st.sidebar.title("ðŸŽ›ï¸ Control Panel")
+
+    # Load data
+    df = load_data()
+    if df is None:
+        return
+
+    # Sidebar options
+    show_eda = st.sidebar.checkbox("ðŸ“Š Show EDA", value=True)
+    show_modeling = st.sidebar.checkbox("ðŸ¤– Show ML Models", value=True)
+    show_prediction = st.sidebar.checkbox("ðŸ”® Show Prediction Interface", value=True)
+
+    # Data splitting options
+    st.sidebar.subheader("ðŸ”§ Model Configuration")
+    test_size = st.sidebar.slider("Test Size (%)", min_value=10, max_value=50, value=20) / 100
+    random_state = st.sidebar.number_input("Random State", min_value=1, max_value=100, value=42)
+
+    # Feature selection
+    st.sidebar.subheader("ðŸŽ¯ Feature Selection")
+    available_features = [col for col in df.columns if col != 'Monthly_Revenue']
+    selected_features = st.sidebar.multiselect("Select Features for Training", 
+                                              available_features, 
+                                              default=available_features)
+
+    # Main content
+    if show_eda:
+        perform_eda(df)
+
+    if show_modeling and selected_features:
+        st.markdown('<h2 class="sub-header">ðŸ¤– Machine Learning Models</h2>', unsafe_allow_html=True)
+
+        # Prepare data with selected features
+        df_selected = df[selected_features + ['Monthly_Revenue']].copy()
+        X, y, le_dict = preprocess_data(df_selected, 'Monthly_Revenue')
+
+        # Train-test split
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=random_state
+        )
+
+        # Display split information
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Training Set Size", len(X_train))
+        with col2:
+            st.metric("Test Set Size", len(X_test))
+        with col3:
+            st.metric("Train/Test Split", f"{int((1-test_size)*100)}/{int(test_size*100)}")
+
+        # Train models
+        with st.spinner("ðŸ”„ Training models... Please wait!"):
+            results, predictions = train_models(X_train, X_test, y_train, y_test)
+
+        # Display results
+        best_model_name, best_model = display_results(results, y_test, predictions)
+
+        # Store best model in session state
+        st.session_state['best_model'] = best_model
+        st.session_state['best_model_name'] = best_model_name
+        st.session_state['le_dict'] = le_dict
+        st.session_state['X_columns'] = X.columns.tolist()
+
+    if show_prediction:
+        if 'best_model' in st.session_state:
+            prediction_interface(st.session_state['best_model'], 
+                                st.session_state['X_columns'],
+                                st.session_state['le_dict'], 
+                                df)
+        else:
+            st.warning("âš ï¸ Please run the ML models first to enable predictions!")
+
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center; color: #666;'>
+        <p>ðŸ½ï¸ Restaurant Revenue Prediction Dashboard | Built with Streamlit & Scikit-learn</p>
+        <p>Select features, adjust parameters, and explore different ML models for accurate revenue forecasting!</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
