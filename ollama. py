@@ -1,1 +1,299 @@
-no work
+import pandas as pd
+import numpy as np
+import faiss
+import chromadb
+from chromadb.utils import embedding_functions
+
+# ============================================
+# CONFIGURATION
+# ============================================
+CSV_FILE = "incidents.csv"  # Your CSV file in current directory
+SIMILARITY_THRESHOLD = 0.96  # 96% threshold
+TOP_K = 10  # Top 10 similar incidents
+
+print("="*60)
+print("🚀 INCIDENT CATEGORIZATION SYSTEM")
+print("Using ChromaDB Embeddings + FAISS Vector Search")
+print("="*60)
+
+# ============================================
+# STEP 1: LOAD CSV DATA
+# ============================================
+print("
+[STEP 1] Loading incident data from CSV...")
+try:
+    df = pd.read_csv(CSV_FILE)
+    print(f"✅ Successfully loaded {len(df)} incidents")
+    print(f"Columns: {list(df.columns)}")
+    print(f"
+First few records:")
+    print(df.head())
+except Exception as e:
+    print(f"❌ Error loading CSV: {e}")
+    exit()
+
+# Clean the data
+if 'Description' not in df.columns:
+    print("❌ 'Description' column not found in CSV")
+    exit()
+
+# Find category/tag column
+category_col = None
+for col in ['Category', 'Tag', 'Type', 'Department', 'category', 'tag', 'type']:
+    if col in df.columns:
+        category_col = col
+        break
+
+if category_col:
+    print(f"✅ Found category column: '{category_col}'")
+else:
+    print("❌ No category/tag column found in CSV")
+    exit()
+
+# ============================================
+# STEP 2: INITIALIZE CHROMADB EMBEDDING
+# ============================================
+print("
+[STEP 2] Initializing ChromaDB Embedding Function...")
+try:
+    embedding_function = embedding_functions.DefaultEmbeddingFunction()
+    print("✅ ChromaDB DefaultEmbeddingFunction initialized")
+except Exception as e:
+    print(f"❌ Error initializing embedding function: {e}")
+    exit()
+
+# ============================================
+# STEP 3: GENERATE EMBEDDINGS
+# ============================================
+print("
+[STEP 3] Generating embeddings for all incident descriptions...")
+try:
+    descriptions = df['Description'].fillna("").tolist()
+    
+    embeddings = embedding_function(descriptions)
+    embeddings_array = np.array(embeddings).astype('float32')
+    
+    print(f"✅ Generated {len(embeddings)} embeddings")
+    print(f"Embedding dimension: {embeddings_array.shape[1]}")
+except Exception as e:
+    print(f"❌ Error generating embeddings: {e}")
+    exit()
+
+# ============================================
+# STEP 4: CREATE FAISS INDEX
+# ============================================
+print("
+[STEP 4] Creating FAISS index for vector search...")
+try:
+    dimension = embeddings_array.shape[1]
+    
+    # Normalize for cosine similarity
+    faiss.normalize_L2(embeddings_array)
+    
+    # Create FAISS index
+    index = faiss.IndexFlatIP(dimension)
+    index.add(embeddings_array)
+    
+    print(f"✅ FAISS index created with {index.ntotal} vectors")
+    print(f"Index type: IndexFlatIP (Cosine Similarity)")
+except Exception as e:
+    print(f"❌ Error creating FAISS index: {e}")
+    exit()
+
+# ============================================
+# STEP 5: CHROMADB COLLECTION
+# ============================================
+print("
+[STEP 5] Storing data in ChromaDB collection...")
+try:
+    chroma_client = chromadb.Client()
+    
+    try:
+        chroma_client.delete_collection(name="incidents")
+    except:
+        pass
+    
+    collection = chroma_client.create_collection(
+        name="incidents",
+        embedding_function=embedding_function,
+        metadata={"hnsw:space": "cosine"}
+    )
+    
+    ids = [str(i) for i in range(len(df))]
+    metadatas = []
+    
+    for idx, row in df.iterrows():
+        metadata = {
+            "incident_id": str(row.get('IncidentID', idx)),
+            "date": str(row.get('Date', '')),
+            "category": str(row[category_col])
+        }
+        metadatas.append(metadata)
+    
+    collection.add(
+        documents=descriptions,
+        metadatas=metadatas,
+        ids=ids
+    )
+    
+    print(f"✅ Stored {len(descriptions)} incidents in ChromaDB")
+except Exception as e:
+    print(f"⚠️ ChromaDB storage warning: {e}")
+
+# ============================================
+# FUNCTION: AI CATEGORIZATION (PLACEHOLDER)
+# ============================================
+def ai_categorization(description):
+    """
+    AI-based categorization function
+    TODO: Add your AI model here (OpenAI, Ollama, etc.)
+    """
+    print("
+[AI] Calling AI categorization function...")
+    print("⚠️ AI categorization not implemented yet (placeholder)")
+    
+    # Placeholder - will be implemented later
+    pass
+    
+    # For now, return a generic category
+    return "Uncategorized"
+
+# ============================================
+# MAIN FUNCTION: PROCESS NEW INCIDENT
+# ============================================
+def process_new_incident(new_description):
+    """Process new incident and assign category using vector search"""
+    print("
+" + "="*60)
+    print("🔍 PROCESSING NEW INCIDENT")
+    print("="*60)
+    print(f"Description: {new_description}")
+    
+    # Generate embedding
+    print("
+[VECTOR] Generating embedding for new incident...")
+    try:
+        new_embedding = embedding_function([new_description])
+        new_embedding_array = np.array(new_embedding).astype('float32')
+        faiss.normalize_L2(new_embedding_array)
+        print("✅ Embedding generated")
+    except Exception as e:
+        print(f"❌ Error generating embedding: {e}")
+        return None
+    
+    # FAISS vector search
+    print(f"
+[SEARCH] Finding top {TOP_K} similar incidents using FAISS...")
+    try:
+        scores, indices = index.search(new_embedding_array, TOP_K)
+        scores = scores[0]
+        indices = indices[0]
+        
+        print(f"✅ Found {len(indices)} similar incidents")
+        print("
+📊 TOP 10 SIMILAR INCIDENTS:")
+        print("-" * 60)
+        
+        similar_incidents = []
+        for i, (idx, score) in enumerate(zip(indices, scores)):
+            similarity_percent = score * 100
+            incident = df.iloc[idx]
+            
+            # Get the actual category/tag (not number)
+            category_tag = str(incident[category_col])
+            
+            similar_incidents.append({
+                'rank': i + 1,
+                'index': int(idx),
+                'similarity': float(similarity_percent),
+                'description': str(incident['Description']),
+                'tag': category_tag  # Actual tag word
+            })
+            
+            print(f"{i+1}. Similarity: {similarity_percent:.2f}%")
+            print(f"   Tag: {category_tag}")
+            print(f"   Description: {incident['Description'][:70]}...")
+            print()
+        
+    except Exception as e:
+        print(f"❌ Error during search: {e}")
+        return None
+    
+    # Calculate average similarity
+    avg_similarity = np.mean(scores) * 100
+    print(f"
+[ANALYSIS] Average Similarity Score: {avg_similarity:.2f}%")
+    print(f"Threshold: {SIMILARITY_THRESHOLD * 100}%")
+    
+    # Decision based on threshold
+    print("
+[DECISION] Making categorization decision...")
+    
+    if avg_similarity >= (SIMILARITY_THRESHOLD * 100):
+        # Use tag from most similar incident
+        top_incident = similar_incidents[0]
+        assigned_tag = top_incident['tag']
+        
+        print(f"✅ Average similarity ({avg_similarity:.2f}%) >= Threshold ({SIMILARITY_THRESHOLD * 100}%)")
+        print(f"📌 Assigning tag from MOST similar incident: '{assigned_tag}'")
+        print(f"   (Top match had {top_incident['similarity']:.2f}% similarity)")
+        method = "Existing Tag (Vector Search)"
+        
+    else:
+        # Call AI categorization function
+        print(f"⚠️ Average similarity ({avg_similarity:.2f}%) < Threshold ({SIMILARITY_THRESHOLD * 100}%)")
+        print("🤖 Calling AI categorization function...")
+        
+        assigned_tag = ai_categorization(new_description)
+        print(f"📌 Assigned tag from AI: '{assigned_tag}'")
+        method = "AI Generated"
+    
+    # Final result
+    print("
+" + "="*60)
+    print("✨ FINAL RESULT")
+    print("="*60)
+    print(f"New Incident: {new_description}")
+    print(f"Assigned Tag: {assigned_tag}")
+    print(f"Average Similarity: {avg_similarity:.2f}%")
+    print(f"Method: {method}")
+    print("="*60)
+    
+    return {
+        'description': new_description,
+        'assigned_tag': assigned_tag,
+        'avg_similarity': avg_similarity,
+        'similar_incidents': similar_incidents,
+        'method': method
+    }
+
+# ============================================
+# STEP 6: USER INPUT
+# ============================================
+print("
+
+" + "="*60)
+print("🎯 READY FOR NEW INCIDENT INPUT")
+print("="*60)
+
+print("
+Enter new incident description (or 'quit' to exit):")
+while True:
+    user_input = input("
+>>> ").strip()
+    
+    if user_input.lower() in ['quit', 'exit', 'q']:
+        print("
+👋 Exiting system. Goodbye!")
+        break
+    
+    if not user_input:
+        print("⚠️ Please enter a valid description")
+        continue
+    
+    # Process the incident
+    result = process_new_incident(user_input)
+    
+    print("
+" + "-"*60)
+    print("Enter another incident description (or 'quit' to exit):")
