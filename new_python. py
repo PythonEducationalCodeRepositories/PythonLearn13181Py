@@ -1,717 +1,632 @@
-from typing import TypedDict, List, Union
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langgraph.graph import StateGraph, START, END
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain.chains.retrieval_qa.base import RetrievalQA
-from pdfplumber.high_level import extract_text
-import tempfile
-import os
-import httpx
-import tiktoken
-import streamlit as st
-from datetime import datetime
-import json
-from io import BytesIO
-from pptx import Presentation
-from pptx.util import Pt
-from fpdf import FPDF
-import spacy
-import pandas as pd
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_LEFT, TA_CENTER
-from docx import Document
-import docx2txt
-import warnings
-warnings.filterwarnings('ignore')
+file_structure = """
+Project Structure:
+==================
+incident_categorization/
+│
+├── db_config.py          # Database and embedding configuration
+├── faiss_indexing.py     # FAISS index creation and management
+├── genai_categorization.py  # AI categorization logic
+└── main.py               # Main application orchestration
+"""
 
-# Configuration Variables
-API_KEY = "your-api-key-here"
-BASE_URL = "https://your-base-url-here"
+print(file_structure)
+print("\n" + "="*60)
+print("Creating modularized files...")
+print("="*60)
 
-# Available Models List with their parameters
-CHAT_MODELS = {
-    "gpt-4o": {"max_tokens": 4096, "temperature": (0.0, 2.0), "top_p": (0.0, 1.0)},
-    "gpt-4o-mini": {"max_tokens": 16384, "temperature": (0.0, 2.0), "top_p": (0.0, 1.0)},
-    "gpt-4-turbo": {"max_tokens": 4096, "temperature": (0.0, 2.0), "top_p": (0.0, 1.0)},
-    "gpt-4": {"max_tokens": 8192, "temperature": (0.0, 2.0), "top_p": (0.0, 1.0)},
-    "gpt-3.5-turbo": {"max_tokens": 4096, "temperature": (0.0, 2.0), "top_p": (0.0, 1.0)},
-    "text-davinci-003": {"max_tokens": 4097, "temperature": (0.0, 2.0), "top_p": (0.0, 1.0)},
-    "your-custom-model-1": {"max_tokens": 4096, "temperature": (0.0, 2.0), "top_p": (0.0, 1.0)},
-    "your-custom-model-2": {"max_tokens": 4096, "temperature": (0.0, 2.0), "top_p": (0.0, 1.0)}
-}
 
-EMBEDDING_MODELS = [
-    "text-embedding-ada-002",
-    "text-embedding-3-small", 
-    "text-embedding-3-large",
-    "your-custom-embedding-model"
-]
 
-# Configure
-st.set_page_config(page_title='Document Chat Assistant', layout='wide')
 
-tiktoken_cache_dir = "./token"
-os.environ["TIKTOKEN_CACHE_DIR"] = tiktoken_cache_dir
-client = httpx.Client(verify=False)
 
-# Load NER model
-@st.cache_resource
-def load_ner_model():
-    try:
-        return spacy.load("en_core_web_sm")
-    except IOError:
-        st.warning("Install spaCy model: python -m spacy download en_core_web_sm")
-        return None
 
-nlp = load_ner_model()
 
-# File processing functions
-def extract_text_from_file(uploaded_file):
-    """Extract text from various file formats"""
-    file_extension = uploaded_file.name.split('.')[-1].lower()
+
+
+
+
+# FILE 1: db_config.py
+# Database and ChromaDB configuration
+
+db_config_content = '''import pandas as pd
+import chromadb
+from chromadb.utils import embedding_functions
+
+
+# ============================================
+# CONFIGURATION
+# ============================================
+CSV_FILE = "incidents.csv"
+
+
+class DatabaseConfig:
+    """Handles CSV loading, ChromaDB initialization, and embedding function"""
     
-    try:
-        if file_extension == 'pdf':
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded_file.read())
-                return extract_text(tmp.name)
+    def __init__(self, csv_file=CSV_FILE):
+        self.csv_file = csv_file
+        self.df = None
+        self.category_col = None
+        self.embedding_function = None
+        self.collection = None
+        self.chroma_client = None
         
-        elif file_extension in ['doc', 'docx']:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_extension}") as tmp:
-                tmp.write(uploaded_file.read())
-                return docx2txt.process(tmp.name)
+    def load_csv(self):
+        """Load incident data from CSV"""
+        print("\\n[STEP 1] Loading incident data from CSV...")
+        try:
+            self.df = pd.read_csv(self.csv_file)
+            print(f"✅ Successfully loaded {len(self.df)} incidents")
+            print(f"Columns: {list(self.df.columns)}")
+            print(f"\\nFirst few records:")
+            print(self.df.head())
+        except Exception as e:
+            print(f"❌ Error loading CSV: {e}")
+            exit()
         
-        elif file_extension == 'txt':
-            return uploaded_file.read().decode('utf-8', errors='ignore')
+        # Validate required columns
+        if 'Description' not in self.df.columns:
+            print("❌ 'Description' column not found in CSV")
+            exit()
         
-        elif file_extension in ['xls', 'xlsx']:
-            df_dict = pd.read_excel(uploaded_file, sheet_name=None)
-            combined_text = ""
-            for sheet_name, df in df_dict.items():
-                combined_text += f"\n\nSheet: {sheet_name}\n"
-                combined_text += df.to_string(index=False)
-            return combined_text
+        # Find category/tag column
+        for col in ['Category', 'Tag', 'Type', 'Department', 'category', 'tag', 'type']:
+            if col in self.df.columns:
+                self.category_col = col
+                break
         
-        elif file_extension == 'csv':
-            df = pd.read_csv(uploaded_file)
-            return df.to_string(index=False)
-        
+        if self.category_col:
+            print(f"✅ Found category column: '{self.category_col}'")
         else:
-            st.error(f"Unsupported file format: {file_extension}")
+            print("❌ No category/tag column found in CSV")
+            exit()
+        
+        return self.df, self.category_col
+    
+    def initialize_embedding_function(self):
+        """Initialize ChromaDB embedding function"""
+        print("\\n[STEP 2] Initializing ChromaDB Embedding Function...")
+        try:
+            self.embedding_function = embedding_functions.DefaultEmbeddingFunction()
+            print("✅ ChromaDB DefaultEmbeddingFunction initialized")
+        except Exception as e:
+            print(f"❌ Error initializing embedding function: {e}")
+            exit()
+        
+        return self.embedding_function
+    
+    def generate_embeddings(self):
+        """Generate embeddings for all descriptions"""
+        print("\\n[STEP 3] Generating embeddings for all incident descriptions...")
+        try:
+            descriptions = self.df['Description'].fillna("").tolist()
+            embeddings = self.embedding_function(descriptions)
+            
+            print(f"✅ Generated {len(embeddings)} embeddings")
+            print(f"Embedding dimension: {len(embeddings[0])}")
+            
+            return embeddings, descriptions
+        except Exception as e:
+            print(f"❌ Error generating embeddings: {e}")
+            exit()
+    
+    def setup_chromadb_collection(self, descriptions):
+        """Create and populate ChromaDB collection"""
+        print("\\n[STEP 5] Storing data in ChromaDB collection...")
+        try:
+            self.chroma_client = chromadb.Client()
+            
+            # Delete existing collection if exists
+            try:
+                self.chroma_client.delete_collection(name="incidents")
+            except:
+                pass
+            
+            # Create new collection
+            self.collection = self.chroma_client.create_collection(
+                name="incidents",
+                embedding_function=self.embedding_function,
+                metadata={"hnsw:space": "cosine"}
+            )
+            
+            # Prepare metadata
+            ids = [str(i) for i in range(len(self.df))]
+            metadatas = []
+            
+            for idx, row in self.df.iterrows():
+                metadata = {
+                    "incident_id": str(row.get('IncidentID', idx)),
+                    "date": str(row.get('Date', '')),
+                    "category": str(row[self.category_col])
+                }
+                metadatas.append(metadata)
+            
+            # Add to collection
+            self.collection.add(
+                documents=descriptions,
+                metadatas=metadatas,
+                ids=ids
+            )
+            
+            print(f"✅ Stored {len(descriptions)} incidents in ChromaDB")
+            return self.collection
+            
+        except Exception as e:
+            print(f"⚠️ ChromaDB storage warning: {e}")
             return None
+    
+    def get_data(self):
+        """Return dataframe and category column"""
+        return self.df, self.category_col
+'''
+
+print("\n✅ FILE 1: db_config.py")
+print("="*60)
+print(db_config_content[:500] + "...\n")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# FILE 2: faiss_indexing.py
+# FAISS index creation and vector search
+
+faiss_indexing_content = '''import numpy as np
+import faiss
+
+
+# ============================================
+# CONFIGURATION
+# ============================================
+SIMILARITY_THRESHOLD = 0.96  # 96% threshold
+TOP_K = 10  # Top 10 similar incidents
+
+
+class FAISSIndexer:
+    """Handles FAISS index creation and vector search"""
+    
+    def __init__(self, similarity_threshold=SIMILARITY_THRESHOLD, top_k=TOP_K):
+        self.index = None
+        self.embeddings_array = None
+        self.similarity_threshold = similarity_threshold
+        self.top_k = top_k
+        
+    def create_index(self, embeddings):
+        """Create FAISS index from embeddings"""
+        print("\\n[STEP 4] Creating FAISS index for vector search...")
+        try:
+            # Convert to numpy array
+            self.embeddings_array = np.array(embeddings).astype('float32')
             
-    except Exception as e:
-        st.error(f"Error processing file: {str(e)}")
-        return None
-
-# File generation functions
-def create_pptx(summary_text: str, filename: str) -> bytes:
-    """Create PowerPoint file from text"""
-    try:
-        prs = Presentation()
-        
-        # Title slide
-        title_slide_layout = prs.slide_layouts[0]
-        slide = prs.slides.add_slide(title_slide_layout)
-        title = slide.shapes.title
-        subtitle = slide.placeholders[1]
-        title.text = f"Summary: {filename}"
-        subtitle.text = "AI Generated Summary"
-        
-        # Content slide
-        bullet_slide_layout = prs.slide_layouts[1]
-        slide = prs.slides.add_slide(bullet_slide_layout)
-        shapes = slide.shapes
-        title_shape = shapes.title
-        body_shape = shapes.placeholders[1]
-        
-        title_shape.text = "Key Points"
-        tf = body_shape.text_frame
-        tf.clear()
-        
-        # Add bullet points
-        lines = [line.strip() for line in summary_text.split('\n') if line.strip()]
-        for i, line in enumerate(lines[:10]):
-            if i == 0:
-                tf.text = line
-            else:
-                p = tf.add_paragraph()
-                p.text = line
-                p.level = 0
-                p.font.size = Pt(14)
-        
-        # Save to bytes
-        pptx_io = BytesIO()
-        prs.save(pptx_io)
-        pptx_io.seek(0)
-        return pptx_io.read()
-    except Exception as e:
-        st.error(f"Error creating PowerPoint: {str(e)}")
-        return None
-
-def create_pdf(text: str, filename: str) -> bytes:
-    """Create PDF file from text"""
-    try:
-        pdf = FPDF()
-        pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        
-        # Title
-        pdf.set_font("Arial", 'B', 16)
-        pdf.cell(0, 10, f'Summary: {filename}', ln=True, align='C')
-        pdf.ln(10)
-        
-        # Content
-        pdf.set_font("Arial", size=12)
-        for line in text.split('\n'):
-            if line.strip():
-                try:
-                    pdf.multi_cell(0, 8, line.strip())
-                except UnicodeEncodeError:
-                    clean_line = line.encode('ascii', 'ignore').decode('ascii')
-                    pdf.multi_cell(0, 8, clean_line)
-                pdf.ln(2)
-        
-        pdf_output = BytesIO()
-        pdf.output(pdf_output)
-        pdf_output.seek(0)
-        return pdf_output.read()
-    except Exception as e:
-        st.error(f"Error creating PDF: {str(e)}")
-        return None
-
-def create_word_doc(text: str, filename: str) -> bytes:
-    """Create Word document from text"""
-    try:
-        doc = Document()
-        
-        # Add title
-        title = doc.add_heading(f'Summary: {filename}', 0)
-        
-        # Add content
-        for line in text.split('\n'):
-            if line.strip():
-                doc.add_paragraph(line.strip())
-        
-        # Save to BytesIO
-        doc_io = BytesIO()
-        doc.save(doc_io)
-        doc_io.seek(0)
-        return doc_io.read()
-    except Exception as e:
-        st.error(f"Error creating Word document: {str(e)}")
-        return None
-
-def create_chat_session_pdf(messages: List, session_name: str) -> bytes:
-    """Create PDF from chat session"""
-    try:
-        buffer = BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=letter)
-        styles = getSampleStyleSheet()
-        story = []
-        
-        # Title
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            fontSize=18,
-            spaceAfter=30,
-            alignment=TA_CENTER
-        )
-        story.append(Paragraph(f"Chat Session: {session_name}", title_style))
-        story.append(Spacer(1, 12))
-        
-        # Messages
-        user_style = ParagraphStyle(
-            'UserStyle',
-            parent=styles['Normal'],
-            fontSize=11,
-            leftIndent=20,
-            spaceAfter=10,
-            alignment=TA_LEFT
-        )
-        
-        bot_style = ParagraphStyle(
-            'BotStyle',
-            parent=styles['Normal'],
-            fontSize=11,
-            leftIndent=20,
-            spaceAfter=10,
-            alignment=TA_LEFT
-        )
-        
-        for msg in messages[1:]:  # Skip system message
-            try:
-                if isinstance(msg, HumanMessage):
-                    clean_content = msg.content.encode('ascii', 'ignore').decode('ascii')
-                    story.append(Paragraph(f"👤 USER: {clean_content}", user_style))
-                elif isinstance(msg, AIMessage):
-                    clean_content = msg.content.encode('ascii', 'ignore').decode('ascii')
-                    story.append(Paragraph(f"🤖 ASSISTANT: {clean_content}", bot_style))
-                story.append(Spacer(1, 6))
-            except Exception:
-                continue
-        
-        # Generate timestamp
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        story.append(Spacer(1, 20))
-        story.append(Paragraph(f"Generated on: {timestamp}", styles['Normal']))
-        
-        doc.build(story)
-        buffer.seek(0)
-        return buffer.read()
-    except Exception as e:
-        st.error(f"Error creating chat PDF: {str(e)}")
-        return None
-
-def extract_entities(text: str) -> dict:
-    """Extract named entities using spaCy NER"""
-    if not nlp or not text:
-        return {}
-    
-    try:
-        doc = nlp(text)
-        entities = {}
-        
-        for ent in doc.ents:
-            if ent.label_ not in entities:
-                entities[ent.label_] = []
-            if ent.text not in entities[ent.label_]:
-                entities[ent.label_].append(ent.text)
-        
-        return entities
-    except Exception:
-        return {}
-
-def format_entities_for_display(entities: dict) -> str:
-    """Format entities for display"""
-    if not entities:
-        return "No entities found."
-    
-    formatted = "## Named Entities:\n\n"
-    
-    entity_labels = {
-        'PERSON': '👤 People',
-        'ORG': '🏢 Organizations', 
-        'GPE': '🌍 Places',
-        'MONEY': '💰 Money',
-        'DATE': '📅 Dates',
-        'TIME': '⏰ Times',
-        'PRODUCT': '📦 Products',
-        'EVENT': '🎉 Events'
-    }
-    
-    for label, items in entities.items():
-        display_label = entity_labels.get(label, f'📋 {label}')
-        formatted += f"**{display_label}:**\n"
-        for item in items[:5]:
-            formatted += f"- {item}\n"
-        formatted += "\n"
-    
-    return formatted
-
-# Initialize session state
-def initialize_session_state():
-    if "chat_sessions" not in st.session_state:
-        st.session_state.chat_sessions = {}
-    
-    if "current_session_id" not in st.session_state:
-        session_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        st.session_state.current_session_id = session_id
-        st.session_state.chat_sessions[session_id] = {
-            "messages": [SystemMessage(content="You are a helpful assistant.")],
-            "rag_chain": None,
-            "rag_ready": False,
-            "file_name": None,
-            "file_type": None,
-            "session_type": "chat",
-            "text_chunks": None,
-            "entities": None
-        }
-    
-    if "selected_chat_model" not in st.session_state:
-        st.session_state.selected_chat_model = list(CHAT_MODELS.keys())[0]
-    
-    if "selected_embedding_model" not in st.session_state:
-        st.session_state.selected_embedding_model = EMBEDDING_MODELS[0]
-    
-    # Model parameters
-    if "model_temperature" not in st.session_state:
-        st.session_state.model_temperature = 0.7
-    
-    if "model_max_tokens" not in st.session_state:
-        st.session_state.model_max_tokens = 1000
-    
-    if "model_top_p" not in st.session_state:
-        st.session_state.model_top_p = 1.0
-
-def get_current_session():
-    return st.session_state.chat_sessions[st.session_state.current_session_id]
-
-def create_new_session(session_type="chat"):
-    session_id = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state.chat_sessions[session_id] = {
-        "messages": [SystemMessage(content="You are a helpful assistant.")],
-        "rag_chain": None,
-        "rag_ready": False,
-        "file_name": None,
-        "file_type": None,
-        "session_type": session_type,
-        "text_chunks": None,
-        "entities": None
-    }
-    st.session_state.current_session_id = session_id
-    return session_id
-
-def delete_session(session_id):
-    if len(st.session_state.chat_sessions) > 1:
-        del st.session_state.chat_sessions[session_id]
-        if st.session_state.current_session_id == session_id:
-            st.session_state.current_session_id = list(st.session_state.chat_sessions.keys())[0]
-
-def display_chat(messages: List[Union[HumanMessage, AIMessage, SystemMessage]]):
-    for msg in messages[1:]:  # Skip system message
-        if isinstance(msg, HumanMessage):
-            st.chat_message("user").write(msg.content)
-        elif isinstance(msg, AIMessage):
-            st.chat_message("assistant").write(msg.content)
-
-def generate_document_summary(text_chunks):
-    try:
-        chat = ChatOpenAI(
-            base_url=BASE_URL,
-            api_key=API_KEY,
-            model=st.session_state.selected_chat_model,
-            temperature=st.session_state.model_temperature,
-            max_tokens=st.session_state.model_max_tokens,
-            top_p=st.session_state.model_top_p,
-            http_client=client
-        )
-        
-        combined_text = "\n".join(text_chunks[:15])
-        summary_prompt = f"Provide a comprehensive summary of the following document:\n\n{combined_text}"
-        
-        response = chat.invoke([HumanMessage(content=summary_prompt)])
-        return response.content
-    except Exception as e:
-        return f"Error generating summary: {str(e)}"
-
-# Initialize
-initialize_session_state()
-
-# Sidebar
-with st.sidebar:
-    st.title("🤖 Document Chat Assistant")
-    
-    # Model Settings
-    st.subheader("🛠️ Model Settings")
-    st.session_state.selected_chat_model = st.selectbox(
-        "Chat Model:",
-        list(CHAT_MODELS.keys()),
-        index=list(CHAT_MODELS.keys()).index(st.session_state.selected_chat_model)
-    )
-    
-    st.session_state.selected_embedding_model = st.selectbox(
-        "Embedding Model:",
-        EMBEDDING_MODELS,
-        index=EMBEDDING_MODELS.index(st.session_state.selected_embedding_model)
-    )
-    
-    # Model Parameters
-    st.subheader("⚙️ Parameters")
-    current_model_config = CHAT_MODELS[st.session_state.selected_chat_model]
-    
-    st.session_state.model_temperature = st.slider(
-        "Temperature:",
-        min_value=current_model_config["temperature"][0],
-        max_value=current_model_config["temperature"][1],
-        value=st.session_state.model_temperature,
-        step=0.1,
-        help="Controls randomness"
-    )
-    
-    st.session_state.model_max_tokens = st.slider(
-        "Max Tokens:",
-        min_value=100,
-        max_value=current_model_config["max_tokens"],
-        value=min(st.session_state.model_max_tokens, current_model_config["max_tokens"]),
-        step=100,
-        help="Maximum response length"
-    )
-    
-    if "top_p" in current_model_config:
-        st.session_state.model_top_p = st.slider(
-            "Top P:",
-            min_value=current_model_config["top_p"][0],
-            max_value=current_model_config["top_p"][1],
-            value=st.session_state.model_top_p,
-            step=0.1,
-            help="Controls diversity"
-        )
-    
-    st.divider()
-    
-    # File Upload
-    st.subheader("📄 Upload Document")
-    st.info("📎 PDF • Word • Excel • CSV • TXT")
-    
-    uploaded_file = st.file_uploader(
-        "Choose file", 
-        type=["pdf", "docx", "doc", "txt", "xlsx", "xls", "csv"]
-    )
-    
-    if uploaded_file:
-        if st.button("🚀 Process Document"):
-            create_new_session("document")
-            current_session = get_current_session()
-            current_session["file_name"] = uploaded_file.name
-            current_session["file_type"] = uploaded_file.name.split('.')[-1].lower()
+            # Normalize for cosine similarity
+            faiss.normalize_L2(self.embeddings_array)
             
-            with st.spinner("Processing document..."):
-                try:
-                    raw_text = extract_text_from_file(uploaded_file)
-                    
-                    if raw_text:
-                        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-                        chunks = text_splitter.split_text(raw_text)
-                        
-                        entities = extract_entities(raw_text)
-                        current_session["entities"] = entities
-                        
-                        embedding_model = OpenAIEmbeddings(
-                            base_url=BASE_URL,
-                            model=st.session_state.selected_embedding_model,
-                            api_key=API_KEY,
-                            http_client=client
-                        )
-                        
-                        vectordb = Chroma.from_texts(chunks, embedding_model, persist_directory="./chroma_index")
-                        vectordb.persist()
-                        
-                        llm = ChatOpenAI(
-                            base_url=BASE_URL,
-                            model=st.session_state.selected_chat_model,
-                            api_key=API_KEY,
-                            temperature=st.session_state.model_temperature,
-                            max_tokens=st.session_state.model_max_tokens,
-                            top_p=st.session_state.model_top_p,
-                            http_client=client
-                        )
-                        
-                        retriever = vectordb.as_retriever()
-                        rag_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, return_source_documents=True)
-                        
-                        current_session["rag_chain"] = rag_chain
-                        current_session["rag_ready"] = True
-                        current_session["text_chunks"] = chunks
-                        
-                        st.success("✅ Document processed!")
-                        st.rerun()
-                    else:
-                        st.error("Failed to extract text")
-                        
-                except Exception as e:
-                    st.error(f"Processing error: {str(e)}")
+            # Create FAISS index
+            dimension = self.embeddings_array.shape[1]
+            self.index = faiss.IndexFlatIP(dimension)
+            self.index.add(self.embeddings_array)
+            
+            print(f"✅ FAISS index created with {self.index.ntotal} vectors")
+            print(f"Index type: IndexFlatIP (Cosine Similarity)")
+            
+            return self.index
+            
+        except Exception as e:
+            print(f"❌ Error creating FAISS index: {e}")
+            exit()
     
-    # Document Actions
-    current_session = get_current_session()
-    if current_session["rag_ready"]:
-        st.subheader("📊 Actions")
-        
-        download_format = st.selectbox(
-            "Summary Format:",
-            ["txt", "pdf", "docx", "pptx"]
-        )
-        
-        if st.button("📄 Generate Summary"):
-            with st.spinner("Generating..."):
-                summary = generate_document_summary(current_session["text_chunks"])
-                filename = current_session["file_name"].rsplit('.', 1)[0]
-                
-                if download_format == "txt":
-                    st.download_button(
-                        "💾 Download TXT",
-                        data=summary,
-                        file_name=f"{filename}_summary.txt",
-                        mime="text/plain"
-                    )
-                elif download_format == "pdf":
-                    pdf_data = create_pdf(summary, filename)
-                    if pdf_data:
-                        st.download_button(
-                            "💾 Download PDF",
-                            data=pdf_data,
-                            file_name=f"{filename}_summary.pdf",
-                            mime="application/pdf"
-                        )
-                elif download_format == "docx":
-                    word_data = create_word_doc(summary, filename)
-                    if word_data:
-                        st.download_button(
-                            "💾 Download Word",
-                            data=word_data,
-                            file_name=f"{filename}_summary.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                        )
-                elif download_format == "pptx":
-                    pptx_data = create_pptx(summary, filename)
-                    if pptx_data:
-                        st.download_button(
-                            "💾 Download PPTX",
-                            data=pptx_data,
-                            file_name=f"{filename}_summary.pptx",
-                            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-                        )
-        
-        if st.button("🔍 Show Entities"):
-            if current_session["entities"]:
-                entity_display = format_entities_for_display(current_session["entities"])
-                st.markdown(entity_display)
+    def search_similar(self, query_embedding):
+        """Search for similar incidents using FAISS"""
+        try:
+            # Convert to numpy array and normalize
+            query_array = np.array([query_embedding]).astype('float32')
+            faiss.normalize_L2(query_array)
+            
+            # Search
+            scores, indices = self.index.search(query_array, self.top_k)
+            scores = scores[0]
+            indices = indices[0]
+            
+            return scores, indices
+            
+        except Exception as e:
+            print(f"❌ Error during search: {e}")
+            return None, None
     
-    st.divider()
+    def get_threshold(self):
+        """Get similarity threshold"""
+        return self.similarity_threshold
     
-    # Chat Sessions
-    st.subheader("💬 Sessions")
+    def get_top_k(self):
+        """Get top K value"""
+        return self.top_k
+
+
+def save_faiss_index(indexer, filepath="faiss_index.bin"):
+    """Save FAISS index to disk (optional - for production reuse)"""
+    try:
+        faiss.write_index(indexer.index, filepath)
+        print(f"✅ FAISS index saved to {filepath}")
+    except Exception as e:
+        print(f"⚠️ Error saving FAISS index: {e}")
+
+
+def load_faiss_index(filepath="faiss_index.bin"):
+    """Load FAISS index from disk (optional - for production reuse)"""
+    try:
+        index = faiss.read_index(filepath)
+        print(f"✅ FAISS index loaded from {filepath}")
+        return index
+    except Exception as e:
+        print(f"⚠️ Error loading FAISS index: {e}")
+        return None
+'''
+
+print("✅ FILE 2: faiss_indexing.py")
+print("="*60)
+print(faiss_indexing_content[:500] + "...\n")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# FILE 3: genai_categorization.py
+# AI categorization logic
+
+genai_categorization_content = '''def ai_categorization(description):
+    """
+    AI-based categorization function
+    TODO: Add your AI model here (OpenAI, Ollama, Azure OpenAI, etc.)
     
-    if st.button("➕ New Chat"):
-        create_new_session("chat")
-        st.rerun()
+    Args:
+        description (str): Incident description text
     
-    # Display sessions with download and delete buttons side by side
-    for session_id in list(st.session_state.chat_sessions.keys()):
-        session = st.session_state.chat_sessions[session_id]
-        session_type = "📄" if session["session_type"] == "document" else "💬"
-        
-        if session["file_name"]:
-            session_name = f"{session_type} {session['file_name'][:10]}..."
-        else:
-            session_name = f"{session_type} Chat {session_id[-8:]}"
-        
-        col1, col2, col3 = st.columns([3, 1, 1])
-        
-        with col1:
-            if st.button(
-                session_name,
-                key=f"session_{session_id}",
-                type="primary" if session_id == st.session_state.current_session_id else "secondary",
-                use_container_width=True
-            ):
-                st.session_state.current_session_id = session_id
-                st.rerun()
-        
-        with col2:
-            # Download button
-            session_data = st.session_state.chat_sessions[session_id]
-            pdf_data = create_chat_session_pdf(session_data["messages"], session_name)
-            if pdf_data:
-                st.download_button(
-                    "📥",
-                    data=pdf_data,
-                    file_name=f"chat_{session_id[-8:]}.pdf",
-                    mime="application/pdf",
-                    key=f"download_{session_id}",
-                    help="Download chat history"
-                )
-        
-        with col3:
-            if st.button("🗑️", key=f"delete_{session_id}", help="Delete session"):
-                delete_session(session_id)
-                st.rerun()
+    Returns:
+        str: Assigned category/tag
     
-    if st.button("🧹 Clear All"):
-        st.session_state.chat_sessions = {}
-        create_new_session("chat")
-        st.rerun()
+    Example implementation with OpenAI:
+    ------------------------------------
+    from openai import OpenAI
+    
+    client = OpenAI(api_key="your-api-key")
+    
+    prompt = f"""
+    You are an incident categorization AI. Analyze the following incident 
+    description and assign the most appropriate category.
+    
+    Incident: {description}
+    
+    Return only the category name, nothing else.
+    """
+    
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3
+    )
+    
+    return response.choices[0].message.content.strip()
+    """
+    
+    print("\\n[AI] Calling AI categorization function...")
+    print("⚠️ AI categorization not implemented yet (placeholder)")
+    
+    # Placeholder - will be implemented later
+    # Add your AI model integration here:
+    # - OpenAI GPT-4
+    # - Azure OpenAI
+    # - Ollama (local models)
+    # - Google Gemini
+    # - Anthropic Claude
+    # etc.
+    
+    # For now, return a generic category
+    return "Uncategorized"
 
-# Main Interface
-current_session = get_current_session()
-session_icon = "📄" if current_session["session_type"] == "document" else "💬"
 
-if current_session["file_name"]:
-    st.title(f"{session_icon} Chat - {current_session['file_name']}")
-else:
-    st.title(f"{session_icon} AI Assistant")
+# ============================================
+# OPTIONAL: Advanced AI Categorization Functions
+# ============================================
 
-# Model info
-st.caption(f"🔧 {st.session_state.selected_chat_model} | 🌡️ {st.session_state.model_temperature} | 📊 {st.session_state.model_max_tokens} tokens")
+def ai_categorization_with_context(description, similar_incidents):
+    """
+    AI categorization with context from similar incidents
+    
+    Args:
+        description (str): New incident description
+        similar_incidents (list): List of similar incidents with tags
+    
+    Returns:
+        str: Assigned category/tag
+    """
+    print("\\n[AI] Calling AI with context from similar incidents...")
+    
+    # Build context from similar incidents
+    context = "\\n".join([
+        f"- {inc['description'][:100]} (Tag: {inc['tag']})"
+        for inc in similar_incidents[:3]
+    ])
+    
+    # TODO: Send to your AI model with context
+    # prompt = f"""
+    # Here are some similar incidents:
+    # {context}
+    # 
+    # New incident: {description}
+    # 
+    # Based on the similar incidents, what category should this be assigned to?
+    # """
+    
+    return "Uncategorized"
 
-# Show entities
-if current_session.get("entities"):
-    with st.expander("🔍 Entities", expanded=False):
-        st.markdown(format_entities_for_display(current_session["entities"]))
 
-# Display chat
-display_chat(current_session["messages"])
+def ai_categorization_batch(descriptions):
+    """
+    Batch AI categorization for multiple incidents
+    
+    Args:
+        descriptions (list): List of incident descriptions
+    
+    Returns:
+        list: List of assigned categories
+    """
+    print(f"\\n[AI] Batch categorizing {len(descriptions)} incidents...")
+    
+    # TODO: Implement batch processing with your AI model
+    # This is more efficient for processing multiple incidents
+    
+    return ["Uncategorized"] * len(descriptions)
+'''
 
-# Chat input
-if current_session["rag_ready"]:
-    prompt = st.chat_input("Ask about your document...")
-    if prompt:
-        current_session["messages"].append(HumanMessage(content=prompt))
-        st.chat_message("user").write(prompt)
+print("✅ FILE 3: genai_categorization.py")
+print("="*60)
+print(genai_categorization_content[:500] + "...\n")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# FILE 4: main.py
+# Main application orchestration
+
+main_content = '''import numpy as np
+from db_config import DatabaseConfig
+from faiss_indexing import FAISSIndexer
+from genai_categorization import ai_categorization
+
+
+print("="*60)
+print("🚀 INCIDENT CATEGORIZATION SYSTEM")
+print("Using ChromaDB Embeddings + FAISS Vector Search")
+print("="*60)
+
+
+# ============================================
+# INITIALIZATION (Run once - save index for production)
+# ============================================
+def initialize_system():
+    """Initialize database, embeddings, and FAISS index"""
+    
+    # Step 1: Initialize database config
+    db_config = DatabaseConfig(csv_file="incidents.csv")
+    
+    # Step 2: Load CSV data
+    df, category_col = db_config.load_csv()
+    
+    # Step 3: Initialize embedding function
+    embedding_function = db_config.initialize_embedding_function()
+    
+    # Step 4: Generate embeddings
+    embeddings, descriptions = db_config.generate_embeddings()
+    
+    # Step 5: Create FAISS index
+    faiss_indexer = FAISSIndexer(similarity_threshold=0.96, top_k=10)
+    faiss_indexer.create_index(embeddings)
+    
+    # Step 6: Setup ChromaDB collection (optional)
+    db_config.setup_chromadb_collection(descriptions)
+    
+    return db_config, faiss_indexer
+
+
+# ============================================
+# MAIN FUNCTION: PROCESS NEW INCIDENT
+# ============================================
+def process_new_incident(new_description, db_config, faiss_indexer):
+    """Process new incident and assign category using vector search"""
+    
+    print("\\n" + "="*60)
+    print("🔍 PROCESSING NEW INCIDENT")
+    print("="*60)
+    print(f"Description: {new_description}")
+    
+    # Get data
+    df, category_col = db_config.get_data()
+    embedding_function = db_config.embedding_function
+    
+    # Generate embedding for new incident
+    print("\\n[VECTOR] Generating embedding for new incident...")
+    try:
+        new_embedding = embedding_function([new_description])[0]
+        print("✅ Embedding generated")
+    except Exception as e:
+        print(f"❌ Error generating embedding: {e}")
+        return None
+    
+    # FAISS vector search
+    print(f"\\n[SEARCH] Finding top {faiss_indexer.get_top_k()} similar incidents using FAISS...")
+    scores, indices = faiss_indexer.search_similar(new_embedding)
+    
+    if scores is None or indices is None:
+        print("❌ Search failed")
+        return None
+    
+    print(f"✅ Found {len(indices)} similar incidents")
+    print("\\n📊 TOP 10 SIMILAR INCIDENTS:")
+    print("-" * 60)
+    
+    similar_incidents = []
+    for i, (idx, score) in enumerate(zip(indices, scores)):
+        similarity_percent = score * 100
+        incident = df.iloc[idx]
         
-        with st.spinner("🤔 Thinking..."):
-            try:
-                result = current_session["rag_chain"].invoke(prompt)
-                answer = result["result"]
-                current_session["messages"].append(AIMessage(content=answer))
-                st.chat_message("assistant").write(answer)
-                st.rerun()
-            except Exception as e:
-                error_msg = f"Error: {str(e)}"
-                current_session["messages"].append(AIMessage(content=error_msg))
-                st.chat_message("assistant").write(error_msg)
-                st.rerun()
-else:
-    prompt = st.chat_input("Ask me anything...")
-    if prompt:
-        current_session["messages"].append(HumanMessage(content=prompt))
-        st.chat_message("user").write(prompt)
+        # Get the actual category/tag
+        category_tag = str(incident[category_col])
         
-        with st.spinner("🤔 Thinking..."):
-            try:
-                chat = ChatOpenAI(
-                    base_url=BASE_URL,
-                    api_key=API_KEY,
-                    temperature=st.session_state.model_temperature,
-                    max_tokens=st.session_state.model_max_tokens,
-                    top_p=st.session_state.model_top_p,
-                    model=st.session_state.selected_chat_model,
-                    http_client=client
-                )
+        similar_incidents.append({
+            'rank': i + 1,
+            'index': int(idx),
+            'similarity': float(similarity_percent),
+            'description': str(incident['Description']),
+            'tag': category_tag
+        })
+        
+        print(f"{i+1}. Similarity: {similarity_percent:.2f}%")
+        print(f"   Tag: {category_tag}")
+        print(f"   Description: {incident['Description'][:70]}...")
+        print()
+    
+    # Calculate average similarity
+    avg_similarity = np.mean(scores) * 100
+    print(f"\\n[ANALYSIS] Average Similarity Score: {avg_similarity:.2f}%")
+    print(f"Threshold: {faiss_indexer.get_threshold() * 100}%")
+    
+    # Decision based on threshold
+    print("\\n[DECISION] Making categorization decision...")
+    
+    if avg_similarity >= (faiss_indexer.get_threshold() * 100):
+        # Use tag from most similar incident
+        top_incident = similar_incidents[0]
+        assigned_tag = top_incident['tag']
+        
+        print(f"✅ Average similarity ({avg_similarity:.2f}%) >= Threshold ({faiss_indexer.get_threshold() * 100}%)")
+        print(f"📌 Assigning tag from MOST similar incident: '{assigned_tag}'")
+        print(f"   (Top match had {top_incident['similarity']:.2f}% similarity)")
+        method = "Existing Tag (Vector Search)"
+        
+    else:
+        # Call AI categorization function
+        print(f"⚠️ Average similarity ({avg_similarity:.2f}%) < Threshold ({faiss_indexer.get_threshold() * 100}%)")
+        print("🤖 Calling AI categorization function...")
+        
+        assigned_tag = ai_categorization(new_description)
+        print(f"📌 Assigned tag from AI: '{assigned_tag}'")
+        method = "AI Generated"
+    
+    # Final result
+    print("\\n" + "="*60)
+    print("✨ FINAL RESULT")
+    print("="*60)
+    print(f"New Incident: {new_description}")
+    print(f"Assigned Tag: {assigned_tag}")
+    print(f"Average Similarity: {avg_similarity:.2f}%")
+    print(f"Method: {method}")
+    print("="*60)
+    
+    return {
+        'description': new_description,
+        'assigned_tag': assigned_tag,
+        'avg_similarity': avg_similarity,
+        'similar_incidents': similar_incidents,
+        'method': method
+    }
 
-                class AgentState(TypedDict):
-                    messages: List[Union[HumanMessage, AIMessage, SystemMessage]]
 
-                def first_node(state: AgentState) -> AgentState:
-                    response = chat.invoke(state["messages"])
-                    state["messages"].append(AIMessage(content=response.content))
-                    return state
+# ============================================
+# MAIN EXECUTION
+# ============================================
+if __name__ == "__main__":
+    # Initialize system (run once - save for production)
+    db_config, faiss_indexer = initialize_system()
+    
+    # User input loop
+    print("\\n\\n" + "="*60)
+    print("🎯 READY FOR NEW INCIDENT INPUT")
+    print("="*60)
+    
+    print("\\nEnter new incident description (or 'quit' to exit):")
+    while True:
+        user_input = input("\\n>>> ").strip()
+        
+        if user_input.lower() in ['quit', 'exit', 'q']:
+            print("\\n👋 Exiting system. Goodbye!")
+            break
+        
+        if not user_input:
+            print("⚠️ Please enter a valid description")
+            continue
+        
+        # Process the incident
+        result = process_new_incident(user_input, db_config, faiss_indexer)
+        
+        print("\\n" + "-"*60)
+        print("Enter another incident description (or 'quit' to exit):")
+'''
 
-                graph = StateGraph(AgentState)
-                graph.add_node("node1", first_node)
-                graph.add_edge(START, "node1")
-                graph.add_edge("node1", END)
-                agent = graph.compile()
+print("✅ FILE 4: main.py")
+print("="*60)
+print(main_content[:500] + "...\n")
 
-                state_input = {"messages": current_session["messages"].copy()}
-                result = agent.invoke(state_input)
-                response = result["messages"][-1].content
 
-                current_session["messages"].append(AIMessage(content=response))
-                st.chat_message("assistant").write(response)
-                st.rerun()
-                
-            except Exception as e:
-                error_msg = f"Error: {str(e)}"
-                current_session["messages"].append(AIMessage(content=error_msg))
-                st.chat_message("assistant").write(error_msg)
-                st.rerun()
-
-# Footer
-st.divider()
-st.caption("💡 Upload documents • Generate summaries • Chat with AI • Download chat history")
