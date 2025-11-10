@@ -1,0 +1,63 @@
+import pandas as pd
+
+# ============ CONFIGURATION - CHANGE THESE VALUES ============
+# File names
+OLD_CSV = 'old.csv'
+NEW_CSV = 'new.csv'
+OUTPUT_CSV = 'new_updated.csv'
+
+# Column names for OLD CSV
+OLD_ID_COL = 'id'
+OLD_DATE_COL = 'date'
+OLD_MONTH_COL = 'month'
+
+# Column names for NEW CSV
+NEW_ID_COL = 'id'
+NEW_DATE_COL = 'date'
+NEW_MONTH_COL = 'month'
+# ==============================================================
+
+# Read the CSV files
+old_df = pd.read_csv(OLD_CSV)
+new_df = pd.read_csv(NEW_CSV)
+
+print("Old CSV:")
+print(old_df.head())
+print(f"
+Old CSV shape: {old_df.shape}")
+print("
+New CSV (before update):")
+print(new_df.head())
+print(f"
+New CSV shape: {new_df.shape}")
+
+# Create a mapping dictionary from old CSV: id -> (date, month)
+id_mapping = old_df.set_index(OLD_ID_COL)[[OLD_DATE_COL, OLD_MONTH_COL]].to_dict('index')
+
+# Fill date and month for matching IDs only
+def fill_from_old(row):
+    if row[NEW_ID_COL] in id_mapping:
+        row[NEW_DATE_COL] = id_mapping[row[NEW_ID_COL]][OLD_DATE_COL]
+        row[NEW_MONTH_COL] = id_mapping[row[NEW_ID_COL]][OLD_MONTH_COL]
+    return row
+
+# Apply the function to update new_df
+new_df = new_df.apply(fill_from_old, axis=1)
+
+print("
+" + "="*50)
+print("New CSV (after update):")
+print(new_df.head(10))
+
+# Save the updated CSV
+new_df.to_csv(OUTPUT_CSV, index=False)
+print(f"
+✓ Updated CSV saved as '{OUTPUT_CSV}'")
+
+# Show summary
+matching_ids = new_df[NEW_ID_COL].isin(old_df[OLD_ID_COL]).sum()
+print(f"
+Summary:")
+print(f"- Total IDs in new CSV: {len(new_df)}")
+print(f"- Matching IDs filled: {matching_ids}")
+print(f"- New IDs (unchanged): {len(new_df) - matching_ids}")
