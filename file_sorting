@@ -1,5 +1,3 @@
-Here is the updated single-block code. I have moved all the folder names and file names to a dedicated **Configuration Section** at the very top of the script so you can easily change them in one place. I have also added the comments clarifying that the input is an Excel file, not a CSV.
-```python
 import os
 import shutil
 import pandas as pd
@@ -12,9 +10,13 @@ from datetime import datetime
 # You can change these names if your files or folders are named differently.
 
 EXCEL_FILE_NAME = 'data.xlsx'           # Name of your input Excel file
-RENDITION_FOLDER_NAME = 'rendition'     # Name of the folder containing the raw PDF files
-FINAL_FOLDER_NAME = 'final files'       # Name of the folder where sorted EDMS folders will go
+REN_FOLDER_NAME = 'ren_files'           # Name of the folder containing the raw PDF files (formerly rendition)
+FINAL_FOLDER_NAME = 'final files'       # Name of the folder where sorted ED folders will go
 LOG_FILE_NAME = 'log.txt'               # Name of the text file where logs will be saved
+
+# Excel Column Headers
+COL_REN = 'Ren files'                   # The column name containing the file names
+COL_ED = 'ED_number'                    # The column name containing the grouping numbers
 
 # =============================================================================
 # SCRIPT EXECUTION
@@ -26,10 +28,10 @@ def log_message(message, log_file=None):
     if log_file:
         log_file.write(message + "\n")
 
-def organize_rendition_files():
+def organize_ren_files():
     cwd = os.getcwd()
     excel_path = os.path.join(cwd, EXCEL_FILE_NAME)
-    rendition_dir = os.path.join(cwd, RENDITION_FOLDER_NAME)
+    ren_dir = os.path.join(cwd, REN_FOLDER_NAME)
     final_dir = os.path.join(cwd, FINAL_FOLDER_NAME)
     log_path = os.path.join(cwd, LOG_FILE_NAME)
 
@@ -51,7 +53,7 @@ def organize_rendition_files():
             log_message(f"Error reading Excel file (Ensure it is an Excel file, not CSV): {e}", log_file)
             return
 
-        edms_folder_map = {}
+        ed_folder_map = {}
         folder_counter = 1
         missing_files_list = []
         skipped_rows = []
@@ -60,53 +62,54 @@ def organize_rendition_files():
         for index, row in df.iterrows():
             excel_row_num = index + 2  # Account for header offset in Excel (header is row 1)
 
-            if 'Rendition' not in df.columns or 'EDMS Number' not in df.columns:
-                log_message(f"Error: Missing required headers 'Rendition' or 'EDMS Number' in Excel.", log_file)
+            # Check if the exact column headers exist
+            if COL_REN not in df.columns or COL_ED not in df.columns:
+                log_message(f"Error: Missing required headers '{COL_REN}' or '{COL_ED}' in Excel.", log_file)
                 return
 
-            raw_rendition = row.get('Rendition')
-            raw_edms = row.get('EDMS Number')
+            raw_ren = row.get(COL_REN)
+            raw_ed = row.get(COL_ED)
 
             # Skip empty rows
-            if pd.isna(raw_rendition) or pd.isna(raw_edms):
+            if pd.isna(raw_ren) or pd.isna(raw_ed):
                 skipped_rows.append(excel_row_num)
-                log_message(f"[Row {excel_row_num}] Skipped: Missing Rendition or EDMS data.", log_file)
+                log_message(f"[Row {excel_row_num}] Skipped: Missing '{COL_REN}' or '{COL_ED}' data.", log_file)
                 continue
 
             # Clean the double quotes and extra spaces from the filename
-            exact_filename = str(raw_rendition).strip().strip('"')
-            edms_number = str(raw_edms).strip()
+            exact_filename = str(raw_ren).strip().strip('"')
+            ed_number = str(raw_ed).strip()
 
             if not exact_filename or exact_filename.lower() == 'nan':
                 skipped_rows.append(excel_row_num)
-                log_message(f"[Row {excel_row_num}] Skipped: Empty Rendition string.", log_file)
+                log_message(f"[Row {excel_row_num}] Skipped: Empty '{COL_REN}' string.", log_file)
                 continue
 
-            # 3. Assign unique sequential folder for EDMS number
-            if edms_number not in edms_folder_map:
-                edms_folder_map[edms_number] = f"{folder_counter}_{edms_number}"
+            # 3. Assign unique sequential folder for ED_number
+            if ed_number not in ed_folder_map:
+                ed_folder_map[ed_number] = f"{folder_counter}_{ed_number}"
                 folder_counter += 1
 
-            target_folder_name = edms_folder_map[edms_number]
+            target_folder_name = ed_folder_map[ed_number]
             target_folder_path = os.path.join(final_dir, target_folder_name)
             
-            # Create the specific EDMS folder inside 'final files'
+            # Create the specific ED folder inside 'final files'
             os.makedirs(target_folder_path, exist_ok=True)
 
             # 4. Check paths and move files
-            source_file = os.path.join(rendition_dir, exact_filename)
+            source_file = os.path.join(ren_dir, exact_filename)
             destination_file = os.path.join(target_folder_path, exact_filename)
 
             if os.path.exists(source_file):
                 try:
                     shutil.move(source_file, destination_file)
-                    log_message(f"[MOVED] '{exact_filename}' -> Path: '{target_folder_name}' (EDMS: {edms_number})", log_file)
+                    log_message(f"[MOVED] '{exact_filename}' -> Path: '{target_folder_name}' (ED: {ed_number})", log_file)
                 except Exception as e:
                     log_message(f"[ERROR] Failed to move '{exact_filename}': {e}", log_file)
-                    missing_files_list.append((excel_row_num, edms_number, exact_filename, f"Exception: {e}"))
+                    missing_files_list.append((excel_row_num, ed_number, exact_filename, f"Exception: {e}"))
             else:
-                log_message(f"[MISSING FILE] File not found in '{RENDITION_FOLDER_NAME}': '{exact_filename}' (EDMS: {edms_number}, Row: {excel_row_num})", log_file)
-                missing_files_list.append((excel_row_num, edms_number, exact_filename, f"File not present in '{RENDITION_FOLDER_NAME}' folder"))
+                log_message(f"[MISSING FILE] File not found in '{REN_FOLDER_NAME}': '{exact_filename}' (ED: {ed_number}, Row: {excel_row_num})", log_file)
+                missing_files_list.append((excel_row_num, ed_number, exact_filename, f"File not present in '{REN_FOLDER_NAME}' folder"))
 
         # 5. Print and Log Summary at the End
         log_message("\n" + "-" * 60, log_file)
@@ -115,7 +118,7 @@ def organize_rendition_files():
         if missing_files_list:
             log_message(f"Total files missing or failed to move: {len(missing_files_list)}", log_file)
             for item in missing_files_list:
-                log_message(f" -> Excel Row {item[0]} | EDMS: {item[1]} | File: '{item[2]}' | Reason: {item[3]}", log_file)
+                log_message(f" -> Excel Row {item[0]} | ED: {item[1]} | File: '{item[2]}' | Reason: {item[3]}", log_file)
         else:
             log_message("All listed files were successfully found and moved without errors!", log_file)
 
@@ -125,6 +128,4 @@ def organize_rendition_files():
         log_message(f"=== Execution Ended at {datetime.now()} ===", log_file)
 
 if __name__ == "__main__":
-    organize_rendition_files()
-
-```
+    organize_ren_files()
