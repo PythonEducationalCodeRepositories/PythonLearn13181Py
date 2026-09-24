@@ -125,3 +125,118 @@ def process_reports():
 
 if __name__ == "__main__":
     process_reports()
+
+
+
+
+
+
+
+
+
+
+def process_reports():
+    cwd = os.getcwd()
+    target_dir = os.path.join(cwd, TARGET_FOLDER_NAME)
+
+    if not os.path.exists(target_dir):
+        print(f"[ERROR] Directory '{TARGET_FOLDER_NAME}' not found in {cwd}.")
+        return
+
+    files = [f for f in os.listdir(target_dir) if f.startswith(PREFIX_MAIN_EXCEL) and f.endswith(".xlsx")]
+    
+    if not files:
+        print(f"[WARNING] No files starting with '{PREFIX_MAIN_EXCEL}' found in '{TARGET_FOLDER_NAME}'.")
+        return
+        
+    print(f"[INFO] Found {len(files)} file(s) to process.")
+    
+    # Console prompt for filtering
+    user_input = input(f"[PROMPT] Include rows where '{FILTER_COLUMN_NAME}' is 0? (y/N): ").strip().lower()
+    include_zero_size = True if user_input == 'y' else False
+    
+    print(f"[INFO] Configuration set: Include 0 {FILTER_COLUMN_NAME} = {include_zero_size}\n")
+
+    for file in files:
+        filepath = os.path.join(target_dir, file)
+        print(f"[PROCESS] Reading file: {file}")
+        
+        try:
+            # Load without headers to dynamically find the exact rows
+            df_full = pd.read_excel(filepath, header=None)
+            main_id_val = None
+            
+            # 1. Extract the main identifier (Row 3 block equivalent)
+            for i in range(min(10, len(df_full))):
+                for j in range(len(df_full.columns)):
+                    if str(df_full.iloc[i, j]).strip() == MAIN_IDENTIFIER_HEADER:
+                        # The value is in the row directly below the header
+                        main_id_val = str(df_full.iloc[i+1, j]).strip()
+                        break
+                if main_id_val:
+                    break
+                    
+            if not main_id_val or main_id_val == "nan":
+                print(f"  -> [ERROR] Could not locate main '{MAIN_IDENTIFIER_HEADER}' in {file}. Skipping.")
+                continue
+            
+            print(f"  -> [INFO] Found main ID: {main_id_val}")
+
+            # 2. Locate the components table header
+            header_row_idx = None
+            for i in range(min(20, len(df_full))):
+                row_vals = [str(x).strip() for x in df_full.iloc[i].values]
+                if TABLE_HEADER_ID in row_vals and TABLE_HEADER_VERSION in row_vals:
+                    header_row_idx = i
+                    break
+            
+            if header_row_idx is None:
+                print(f"  -> [ERROR] Could not find component headers in {file}. Skipping.")
+                continue
+
+            # Load the components dataframe using the found header row
+            df_components = pd.read_excel(filepath, skiprows=header_row_idx)
+            
+            # 3. Filter based on the specified column
+            if FILTER_COLUMN_NAME in df_components.columns:
+                # Coerce to numeric to handle empty cells or string zeros safely
+                df_components[FILTER_COLUMN_NAME] = pd.to_numeric(df_components[FILTER_COLUMN_NAME], errors='coerce').fillna(0)
+                
+                if not include_zero_size:
+                    initial_count = len(df_components)
+                    df_components = df_components[df_components[FILTER_COLUMN_NAME] > 0]
+                    filtered_count = initial_count - len(df_components)
+                    if filtered_count > 0:
+                        print(f"  -> [INFO] Dropped {filtered_count} rows where {FILTER_COLUMN_NAME} was 0.")
+            
+            # 4. Construct the output DataFrame
+            output_df = pd.DataFrame()
+            output_df[COLUMN_1_HEADER] = df_components[TABLE_HEADER_ID]
+            
+            # FIX: Force the version column to string explicitly so Pandas/Excel 
+            # does not cast decimal versions (like 1.0 or 0.1) into integers (like 1 or 0).
+            output_df[COLUMN_2_HEADER] = df_components[TABLE_HEADER_VERSION].astype(float).astype(str)
+            
+            # 5. File Operations & Directory Management
+            id_folder = os.path.join(target_dir, main_id_val)
+            os.makedirs(id_folder, exist_ok=True)
+            
+            # Rename and move the original file into the new ID folder
+            new_original_name = f"{OUTPUT_ORIGINAL_PREFIX}{main_id_val}.xlsx"
+            new_original_path = os.path.join(id_folder, new_original_name)
+            shutil.move(filepath, new_original_path)
+            print(f"  -> [SUCCESS] Moved original to: {main_id_val}/{new_original_name}")
+            
+            # Save the new input sheet in the main target directory
+            new_input_name = f"{OUTPUT_INPUT_SHEET_PREFIX}{main_id_val}.xlsx"
+            new_input_path = os.path.join(target_dir, new_input_name)
+            output_df.to_excel(new_input_path, index=False)
+            print(f"  -> [SUCCESS] Created input sheet: {new_input_name}")
+            
+        except Exception as e:
+            print(f"  -> [ERROR] Failed processing {file}. Reason: {e}")
+            
+    print("\n[INFO] Batch processing complete.")
+
+if __name__ == "__main__":
+    process_reports()
