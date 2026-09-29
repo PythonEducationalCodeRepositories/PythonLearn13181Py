@@ -13,7 +13,7 @@ COL_PRIMARY_ID = "ENTER_PRIMARY_ID_COLUMN_HERE"
 COL_SECONDARY_ID = "ENTER_SECONDARY_ID_COLUMN_HERE"
 
 # Query Template
-# Use {secondary_id} and {primary_id} as placeholders.
+# IMPORTANT: You MUST use {secondary_id} and {primary_id} exactly like this in your query string.
 QUERY_TEMPLATE = "ENTER_YOUR_QUERY_TEMPLATE_HERE"
 # ==========================================
 
@@ -56,6 +56,7 @@ def generate_queries():
                 primary_val = str(row[COL_PRIMARY_ID]).strip()
                 secondary_val = str(row[COL_SECONDARY_ID]).strip()
                 
+                # Formats the query strictly using the generic placeholders
                 query = QUERY_TEMPLATE.format(secondary_id=secondary_val, primary_id=primary_val)
                 
                 if secondary_val not in queries_by_group:
@@ -76,28 +77,33 @@ def generate_queries():
         os.makedirs(master_run_folder, exist_ok=True)
         
         print(f"\n[INFO] Creating main timestamp folder: {f'Run_{timestamp_str}'}")
-        print(f"[INFO] Saving queries for {len(queries_by_group)} unique groups...")
         
-        for secondary_val, queries in queries_by_group.items():
-            safe_folder_name = "".join([c for c in secondary_val if c.isalnum() or c in ('-', '_')]).strip()
-            
-            group_folder_path = os.path.join(master_run_folder, safe_folder_name)
-            os.makedirs(group_folder_path, exist_ok=True)
-            
-            output_path = os.path.join(group_folder_path, OUTPUT_FILE_NAME)
-            
-            try:
-                with open(output_path, 'w', encoding='utf-8') as f:
+        # Define the path for the single master text file outside the subfolders
+        master_output_path = os.path.join(master_run_folder, OUTPUT_FILE_NAME)
+        
+        try:
+            # Open the master file once
+            with open(master_output_path, 'w', encoding='utf-8') as f:
+                for secondary_val, queries in queries_by_group.items():
+                    
+                    # Create the empty subfolders named after the ID
+                    safe_folder_name = "".join([c for c in secondary_val if c.isalnum() or c in ('-', '_')]).strip()
+                    group_folder_path = os.path.join(master_run_folder, safe_folder_name)
+                    os.makedirs(group_folder_path, exist_ok=True)
+                    
+                    # Write this group's queries into the single master file
                     for q in queries:
                         f.write(q + "\n\n") 
-                print(f"  -> [SAVED] {len(queries)} queries to '{safe_folder_name}/{OUTPUT_FILE_NAME}'")
-            except Exception as e:
-                print(f"  -> [ERROR] Failed to write file for {safe_folder_name}: {e}")
+                        
+            print(f"  -> [SAVED] All queries combined into '{OUTPUT_FILE_NAME}' in the main Run folder.")
+            print(f"  -> [CREATED] {len(queries_by_group)} empty subfolders.")
+            
+        except Exception as e:
+            print(f"  -> [ERROR] Failed to write master file: {e}")
                 
-        print(f"\n[SUCCESS] Operation complete. Processed {total_queries_generated} total queries across {len(queries_by_group)} folders inside Run_{timestamp_str}.")
+        print(f"\n[SUCCESS] Operation complete. Processed {total_queries_generated} total queries inside Run_{timestamp_str}.")
     else:
         print("\n[INFO] No queries were generated.")
 
 if __name__ == "__main__":
     generate_queries()
-
